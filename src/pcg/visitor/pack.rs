@@ -352,6 +352,24 @@ impl<'pcg, 'a: 'pcg, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx> + DebugCtxt>
                     ShouldPackEdge::No
                 }
             } else {
+                // A borrow whose loan the borrow checker still has in scope
+                // stays, even if its reference is dead: a reborrow through
+                // the reference (e.g. `m = &mut (*r).0`) keeps the loan alive.
+                if let BorrowPcgEdgeKind::Borrow(borrow) = edge
+                    && let Some(index) = borrow.borrow_index()
+                    && let Some(bc) = self.ctxt.bc().rust_borrow_checker()
+                    && bc.borrow_in_scope_at(index, location)
+                {
+                    return ShouldPackEdge::No;
+                }
+                // The reference's deref is still expanded: collapse it first,
+                // so that the borrow is removed (and the reference weakened)
+                // only once the referent is back in the reference.
+                if let BorrowPcgEdgeKind::Borrow(borrow) = edge
+                    && fg.has_edge_blocking(borrow.assigned_ref().into(), self.ctxt)
+                {
+                    return ShouldPackEdge::No;
+                }
                 let mut why_killed_reasons = Vec::new();
                 for node in edge.blocked_by_nodes(self.ctxt) {
                     if let ShouldKillNode::Yes { reason } = should_kill_node(node, &fg) {
