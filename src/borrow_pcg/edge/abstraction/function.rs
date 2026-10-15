@@ -240,6 +240,9 @@ fn generalized_outlives<'tcx>(
                 // RegionsIn(T) -> Region(r): regions appearing in T itself
                 // (e.g. if T is `A<'a>` which was substituted for Self)
                 for r in extract_regions(ty) {
+                    if let PcgRegion::RegionsIn(_) = r {
+                        continue;
+                    }
                     let gl = GeneralizedLifetime::Region(r);
                     if !visited.contains(&gl) {
                         queue.push(gl);
@@ -753,6 +756,7 @@ impl<'a, 'tcx: 'a> DefinedFnCallShapeDataSource<'a, 'tcx> {
             PcgRegion::ReLateParam(_) | PcgRegion::ReStatic | PcgRegion::ReEarlyParam(_) => {
                 Some(GeneralizedLifetime::Region(region))
             }
+            PcgRegion::RegionsIn(_) => self.norm_to_generalized_map.get(&region).copied(),
             PcgRegion::RegionVid(_) => {
                 // First try the structural map, which captures late-bound
                 // regions and regions inside type parameters.

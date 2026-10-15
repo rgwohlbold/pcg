@@ -60,7 +60,7 @@ impl<'tcx, Ctxt: Copy + HasTyCtxt<'tcx>> LifetimeDataCtxt<'tcx, GeneralizedLifet
 }
 
 struct LifetimeExtractor<'tcx> {
-    lifetimes: Vec<ty::Region<'tcx>>,
+    lifetimes: Vec<PcgRegion<'tcx>>,
 }
 
 impl<'tcx> TypeVisitor<ty::TyCtxt<'tcx>> for LifetimeExtractor<'tcx> {
@@ -72,6 +72,12 @@ impl<'tcx> TypeVisitor<ty::TyCtxt<'tcx>> for LifetimeExtractor<'tcx> {
             }
             //  TODO: Justify why function pointers are ignored
             ty::TyKind::FnPtr(_, _) => {}
+            ty::TyKind::Param(param_ty) => {
+                let region = PcgRegion::RegionsIn(*param_ty);
+                if !self.lifetimes.contains(&region) {
+                    self.lifetimes.push(region);
+                }
+            }
             ty::TyKind::Closure(_, args) => {
                 let closure_args = args.as_closure();
                 let upvar_tys = closure_args.upvar_tys();
@@ -85,8 +91,9 @@ impl<'tcx> TypeVisitor<ty::TyCtxt<'tcx>> for LifetimeExtractor<'tcx> {
         }
     }
     fn visit_region(&mut self, rr: ty::Region<'tcx>) {
-        if !self.lifetimes.contains(&rr) {
-            self.lifetimes.push(rr);
+        let region = rr.into();
+        if !self.lifetimes.contains(&region) {
+            self.lifetimes.push(region);
         }
     }
 }
@@ -105,10 +112,12 @@ impl<'tcx> TypeVisitor<ty::TyCtxt<'tcx>> for LifetimeExtractor<'tcx> {
 /// T<'c, 'd> will return `['a, 'b]` and `['c, 'd]` respectively. This enables
 /// substitution of regions to handle moves in the PCG e.g for the statement
 /// `let x: T<'a, 'b> = move c: T<'c, 'd>`.
+///
+/// A type parameter `T` contributes the pseudo-region `RegionsIn(T)`.
 pub(crate) fn extract_regions(ty: ty::Ty<'_>) -> IndexVec<LifetimeProjectionIdx, PcgRegion<'_>> {
     let mut visitor = LifetimeExtractor { lifetimes: vec![] };
     ty.visit_with(&mut visitor);
-    visitor.lifetimes.iter().map(|r| (*r).into()).collect()
+    visitor.lifetimes.into_iter().collect()
 }
 
 /// An opaque type whose internal structure is not visible for lifetime

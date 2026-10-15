@@ -54,6 +54,10 @@ pub enum PcgRegion<'tcx> {
     ReLateParam(ty::LateParamRegion),
     PcgInternalError(PcgRegionInternalError),
     ReEarlyParam(ty::EarlyParamRegion),
+    /// The regions inside a type parameter `T` (`RegionsIn(T)`): a
+    /// pseudo-region with no region variable, outliving every region
+    /// variable of the body (the regions of `T` are the caller's).
+    RegionsIn(ty::ParamTy),
 }
 
 /// A region occurring in region projections
@@ -68,6 +72,10 @@ pub enum PcgRegion<'tcx> {
     ReLateParam(ty::LateParamRegion),
     PcgInternalError(PcgRegionInternalError),
     ReEarlyParam(ty::EarlyParamRegion),
+    /// The regions inside a type parameter `T` (`RegionsIn(T)`): a
+    /// pseudo-region with no region variable, outliving every region
+    /// variable of the body (the regions of `T` are the caller's).
+    RegionsIn(ty::ParamTy),
     #[doc(hidden)]
     _Phantom(PhantomData<&'tcx ()>),
 }
@@ -132,6 +140,7 @@ impl<'tcx> PcgRegion<'tcx> {
             PcgRegion::ReEarlyParam(early_param_region) => {
                 ty::Region::new_early_param(ctxt, early_param_region)
             }
+            PcgRegion::RegionsIn(_) => panic!("`RegionsIn(T)` is not a Rust region"),
         }
     }
 
@@ -168,6 +177,7 @@ impl<'tcx> PcgRegion<'tcx> {
             PcgRegion::ReEarlyParam(early_param_region) => {
                 ty::Region::new_early_param(ctxt, early_param_region)
             }
+            PcgRegion::RegionsIn(_) => panic!("`RegionsIn(T)` is not a Rust region"),
             _ => unreachable!(),
         }
     }
@@ -218,6 +228,7 @@ impl<'tcx, Ctxt: HasTyCtxt<'tcx> + DisplayCtxtFor<RegionVid>> DisplayWithCtxt<Ct
             PcgRegion::ReEarlyParam(early_param_region) => {
                 early_param_region.name.to_string().into()
             }
+            PcgRegion::RegionsIn(param_ty) => format!("RegionsIn({param_ty})").into(),
             _ => unreachable!(),
         }
     }
@@ -664,6 +675,11 @@ pub(crate) fn region_is_invariant_in_type<'tcx>(
     region: PcgRegion<'tcx>,
     ty: ty::Ty<'tcx>,
 ) -> bool {
+    // As for generalized lifetimes: a type parameter occurring in the type is
+    // considered invariant.
+    if let PcgRegion::RegionsIn(_) = region {
+        return extract_regions(ty).raw.contains(&region);
+    }
     let mut visitor = TyVarianceVisitor {
         tcx,
         target: region,

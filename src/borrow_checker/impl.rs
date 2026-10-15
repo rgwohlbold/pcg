@@ -228,6 +228,7 @@ impl<'mir, 'tcx: 'mir> RustBorrowCheckerInterface<'tcx> for PoloniusBorrowChecke
                 }
                 false
             }),
+            PcgRegion::RegionsIn(_) => false,
             _ => todo!(),
         })
     }
@@ -258,11 +259,12 @@ impl<'mir, 'tcx: 'mir> RustBorrowCheckerInterface<'tcx> for PoloniusBorrowChecke
         loan: BorrowIndex,
         location: Location,
     ) -> bool {
+        // A pseudo-region (`RegionsIn(T)`) contains no loans of the body.
+        let Some(vid) = region.vid() else {
+            return false;
+        };
         self.origin_contains_loan_at_map(RichLocation::Start(location))
-            .is_some_and(|map| {
-                map.get(&region.vid().unwrap())
-                    .is_some_and(|set| set.contains(&loan))
-            })
+            .is_some_and(|map| map.get(&vid).is_some_and(|set| set.contains(&loan)))
     }
 
     fn borrows_in_scope_at(&self, location: Location, before: bool) -> InScopeBorrows {
@@ -353,9 +355,13 @@ impl<'tcx> RustBorrowCheckerInterface<'tcx> for NllBorrowCheckerImpl<'_, 'tcx> {
         loan: BorrowIndex,
         _location: Location,
     ) -> bool {
+        // A pseudo-region (`RegionsIn(T)`) contains no loans of the body.
+        let Some(vid) = region.vid() else {
+            return false;
+        };
         self.borrow_checker_data
             .region_cx
-            .eval_outlives(self.borrow_index_to_region(loan), region.vid().unwrap())
+            .eval_outlives(self.borrow_index_to_region(loan), vid)
     }
 
     fn borrows_in_scope_at(&self, location: Location, before: bool) -> InScopeBorrows {

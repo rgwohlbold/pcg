@@ -412,6 +412,11 @@ pub trait RustBorrowCheckerInterface<'tcx> {
                 self.region_infer_ctxt().eval_outlives(sup, sub)
             }
             (PcgRegion::ReStatic, _) => true,
+            // The regions of a type parameter are the caller's: they outlive
+            // every region variable of the body (over-approximated for the
+            // universal ones, which need a `T: 'a` bound).
+            (PcgRegion::RegionsIn(_), PcgRegion::RegionVid(_)) => true,
+            (PcgRegion::RegionsIn(a), PcgRegion::RegionsIn(b)) => a == b,
             _ => false,
         }
     }
