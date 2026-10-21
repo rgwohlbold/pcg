@@ -8,7 +8,7 @@ use crate::{
         action::{ApplyActionResult, LabelPlaceReason},
         borrow_pcg_edge::BorrowPcgEdge,
         borrow_pcg_expansion::{BorrowPcgExpansion, PlaceExpansion},
-        edge::{deref::DerefEdge, kind::BorrowPcgEdgeKind},
+        edge::{borrow_flow::BorrowFlowEdgeKind, deref::DerefEdge, kind::BorrowPcgEdgeKind},
         edge_data::{EdgeData, LabelNodePredicate},
         graph::Conditioned,
         state::{BorrowStateMutRef, BorrowsStateLike},
@@ -377,6 +377,38 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
                             existing_cap,
                             Some(CapabilityKind::Write),
                             "remove borrow edge",
+                        )
+                        .into(),
+                    )?;
+                }
+            }
+            // As for borrows: a value built from parts whose loans expired is
+            // dead, so its lifetime projections are removed.
+            BorrowPcgEdgeKind::BorrowFlow(flow)
+                if matches!(flow.kind(), BorrowFlowEdgeKind::Aggregate { .. }) =>
+            {
+                let target = flow.short();
+                if target.label().is_none()
+                    && let MaybeLabelledPlace::Current(place) = target.base()
+                    && place.lifetime_projections(self.ctxt).into_iter().all(|rp| {
+                        self.ctxt
+                            .bc()
+                            .is_dead(rp.to_pcg_node(self.ctxt.bc_ctxt()), self.location())
+                    })
+                    && let Some(existing_cap) = self.pcg.capability_of(place, self.ctxt)
+                    && existing_cap != CapabilityKind::Write
+                    && self
+                        .get_local_expansions(place.local)
+                        .expansions_from(place)
+                        .next()
+                        .is_none()
+                {
+                    self.record_and_apply_action(
+                        BorrowPcgAction::weaken(
+                            place,
+                            existing_cap,
+                            Some(CapabilityKind::Write),
+                            "remove aggregate edge",
                         )
                         .into(),
                     )?;
