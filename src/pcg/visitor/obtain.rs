@@ -8,11 +8,7 @@ use crate::{
         action::{ApplyActionResult, LabelPlaceReason},
         borrow_pcg_edge::BorrowPcgEdge,
         borrow_pcg_expansion::{BorrowPcgExpansion, PlaceExpansion},
-        edge::{
-            borrow_flow::private::FutureEdgeKind,
-            deref::DerefEdge,
-            kind::{BorrowPcgEdgeKind, BorrowPcgEdgeType},
-        },
+        edge::{deref::DerefEdge, kind::BorrowPcgEdgeKind},
         edge_data::{EdgeData, LabelNodePredicate},
         graph::Conditioned,
         state::{BorrowStateMutRef, BorrowsStateLike},
@@ -647,9 +643,7 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
                     LabelNodePredicate::And(vec![
                         LabelNodePredicate::PlaceEquals(place),
                         LabelNodePredicate::InSourceNodes,
-                        LabelNodePredicate::EdgeType(BorrowPcgEdgeType::BorrowFlow {
-                            future_edge_kind: Some(FutureEdgeKind::FromExpansion),
-                        }),
+                        LabelNodePredicate::from_expansion_or_borrow_edge(),
                     ]),
                     None,
                     "label place and update related capabilities",

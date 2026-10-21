@@ -9,6 +9,7 @@ use crate::{
         borrow_pcg_edge::{BorrowPcgEdge, BorrowPcgEdgeLike, BorrowPcgEdgeRef, LocalNode},
         edge::{
             abstraction::{AbstractionBlockEdge, AbstractionEdge, r#loop::LoopAbstraction},
+            borrow_flow::private::FutureEdgeKind,
             kind::BorrowPcgEdgeKind,
         },
         edge_data::{EdgeData, LabelNodePredicate},
@@ -791,7 +792,13 @@ fn add_rp_block_edges<'mir, 'tcx, Ctxt: HasBorrowCheckerCtxt<'mir, 'tcx> + HasSe
                     mut_rps.display_string(ctxt)
                 );
                 expander
-                    .add_and_update_placeholder_edges(blocked_rp, &mut_rps, "mut rps", ctxt)
+                    .add_and_update_placeholder_edges(
+                        blocked_rp,
+                        &mut_rps,
+                        FutureEdgeKind::FromExpansion,
+                        "mut rps",
+                        ctxt,
+                    )
                     .unwrap();
                 expander.render_debug_graph(
                     Some(DebugImgcat::JoinLoop),

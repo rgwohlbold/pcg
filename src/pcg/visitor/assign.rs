@@ -6,6 +6,7 @@ use crate::{
         edge::{
             borrow_flow::{
                 AssignmentData, BorrowFlowEdge, BorrowFlowEdgeKind, CastData, OperandType,
+                private::FutureEdgeKind,
             },
             delegation::DelegationEdge,
             kind::BorrowPcgEdgeKind,
@@ -333,6 +334,7 @@ impl<'a, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>> PcgVisitor<'_, 'a, 'tcx, Ctxt> 
             self.place_obtainer().add_and_update_placeholder_edges(
                 source_proj.into(),
                 &nested_ref_mut_targets,
+                FutureEdgeKind::FromBorrow,
                 "assign",
                 ctxt,
             )?;
