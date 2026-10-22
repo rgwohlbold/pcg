@@ -115,6 +115,7 @@ impl<'a, 'tcx: 'a> PcgAnalysisResults<'a, 'tcx> {
         let result = PcgLocation {
             location,
             actions: state.data.actions.clone(),
+            entry_state: (*state.data.pcg.entry_state).clone(),
             states: state.data.pcg.states.to_owned(),
         };
 
@@ -382,6 +383,8 @@ impl<'a, 'tcx: 'a> PcgBasicBlock<'a, 'tcx> {
 #[derive(Debug, Clone)]
 pub struct PcgLocation<'a, 'tcx> {
     pub location: Location,
+    /// The state before the actions of the first phase.
+    pub entry_state: Pcg<'a, 'tcx>,
     pub states: DomainDataStates<Pcg<'a, 'tcx>>,
     pub(crate) actions: EvalStmtData<AppliedActions<'tcx>>,
 }
