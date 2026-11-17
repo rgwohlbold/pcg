@@ -9,10 +9,7 @@ use crate::{
         GeneralizedLifetime,
         action::LabelPlaceReason,
         borrow_pcg_edge::BorrowPcgEdge,
-        edge::{
-            borrow_flow::{BorrowFlowEdge, BorrowFlowEdgeKind},
-            kind::BorrowPcgEdgeType,
-        },
+        edge::{aggregate::AggregateEdge, kind::BorrowPcgEdgeType},
         edge_data::LabelNodePredicate,
         has_pcs_elem::{LabelNodeContext, SetLabel, SourceOrTarget},
         region_projection::LocalLifetimeProjection,
@@ -388,7 +385,8 @@ pub(crate) trait PlaceCollapser<'a, 'tcx: 'a>:
         expansion: &[LocalLifetimeProjection<'tcx>],
         ctxt: Ctxt,
     ) -> Result<(), PcgError> {
-        for (idx, node) in expansion.iter().enumerate() {
+        let mut sources = Vec::new();
+        for node in expansion {
             if let Some(place) = node.base.as_current_place() {
                 let labeller = SetLabel(self.prev_snapshot_location());
                 self.borrows_state().graph.label_place(
@@ -403,30 +401,20 @@ pub(crate) trait PlaceCollapser<'a, 'tcx: 'a>:
                     &mut replacements,
                     &LabelNodePredicate::PlaceEquals((*place).into()),
                     &labeller,
-                    LabelNodeContext::new(
-                        SourceOrTarget::Source,
-                        BorrowPcgEdgeType::BorrowFlow {
-                            future_edge_kind: None,
-                        },
-                    ),
+                    LabelNodeContext::new(SourceOrTarget::Source, BorrowPcgEdgeType::Aggregate),
                     ctxt.bc_ctxt(),
                 );
-                let edge = BorrowPcgEdge::new(
-                    BorrowFlowEdge::new(
-                        node.into(),
-                        base,
-                        BorrowFlowEdgeKind::Aggregate {
-                            field_idx: idx,
-                            target_rp_index: 0, // TODO
-                        },
-                    )
-                    .into(),
-                    self.borrows_state().validity_conditions.clone(),
-                );
-                self.apply_action(
-                    BorrowPcgAction::add_edge(edge, "create_aggregate_lifetime_projections").into(),
-                )?;
+                sources.push(node.into());
             }
+        }
+        if !sources.is_empty() {
+            let edge = BorrowPcgEdge::new(
+                AggregateEdge::new(sources, base).into(),
+                self.borrows_state().validity_conditions.clone(),
+            );
+            self.apply_action(
+                BorrowPcgAction::add_edge(edge, "create_aggregate_lifetime_projections").into(),
+            )?;
         }
         Ok(())
     }
