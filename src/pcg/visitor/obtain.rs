@@ -9,7 +9,7 @@ use crate::{
         borrow_pcg_edge::BorrowPcgEdge,
         borrow_pcg_expansion::{BorrowPcgExpansion, PlaceExpansion},
         edge::{
-            borrow_flow::private::FutureEdgeKind,
+            borrow_flow::{BorrowFlowEdgeKind, private::FutureEdgeKind},
             deref::DerefEdge,
             kind::{BorrowPcgEdgeKind, BorrowPcgEdgeType},
         },
@@ -385,9 +385,18 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
         &mut self,
         edge: &BorrowPcgEdgeKind<'tcx>,
     ) -> Result<(), PcgError> {
+        // Removing an aggregate edge means that the loans of the parts
+        // expired. For other edges, e.g. from the lender of an argument, the
+        // loans may still be held by the caller, and an expanded place must be
+        // packed again to give them back.
+        let expired = matches!(
+            edge,
+            BorrowPcgEdgeKind::BorrowFlow(flow)
+                if matches!(flow.kind(), BorrowFlowEdgeKind::Aggregate { .. })
+        );
         for place in self.places_with_dead_lifetime_projections(edge) {
             if !self.reference_in_use(place) {
-                self.weaken_place_with_dead_lifetime_projection(place)?;
+                self.weaken_place_with_dead_lifetime_projection(place, expired)?;
             }
         }
         Ok(())
@@ -435,22 +444,38 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
             .collect()
     }
 
+    /// Weakens `place` to [`CapabilityKind::Write`]. If `place` is expanded, it
+    /// has no capability itself; if the loans flowing into it `expired`, the
+    /// places it is expanded into are weakened instead, since a use of any of
+    /// them would use `place` and thereby its dead lifetime projections.
     fn weaken_place_with_dead_lifetime_projection(
         &mut self,
         place: Place<'tcx>,
+        expired: bool,
     ) -> Result<(), PcgError> {
-        if let Some(existing_cap) = self.pcg.capability_of(place, self.ctxt)
-            && existing_cap > CapabilityKind::Write
-        {
-            self.record_and_apply_action(
-                BorrowPcgAction::weaken(
-                    place,
-                    existing_cap,
-                    Some(CapabilityKind::Write),
-                    "lifetime projection is dead",
-                )
-                .into(),
-            )?;
+        let to_weaken = match self.pcg.capability_of(place, self.ctxt) {
+            Some(existing_cap) => vec![(place, existing_cap)],
+            None if !expired => Vec::new(),
+            None => self
+                .pcg
+                .place_capabilities
+                .iter()
+                .filter(|(p, _)| place.is_prefix_of(*p) && *p != place)
+                .filter(|(p, _)| !self.reference_in_use(*p))
+                .collect(),
+        };
+        for (p, existing_cap) in to_weaken {
+            if existing_cap > CapabilityKind::Write {
+                self.record_and_apply_action(
+                    BorrowPcgAction::weaken(
+                        p,
+                        existing_cap,
+                        Some(CapabilityKind::Write),
+                        "lifetime projection is dead",
+                    )
+                    .into(),
+                )?;
+            }
         }
         Ok(())
     }
