@@ -9,7 +9,7 @@ use crate::{
         borrow_pcg_edge::BorrowPcgEdge,
         borrow_pcg_expansion::{BorrowPcgExpansion, PlaceExpansion},
         edge::{
-            borrow_flow::{BorrowFlowEdgeKind, private::FutureEdgeKind},
+            borrow_flow::private::FutureEdgeKind,
             deref::DerefEdge,
             kind::{BorrowPcgEdgeKind, BorrowPcgEdgeType},
         },
@@ -389,11 +389,7 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
         // expired. For other edges, e.g. from the lender of an argument, the
         // loans may still be held by the caller, and an expanded place must be
         // packed again to give them back.
-        let expired = matches!(
-            edge,
-            BorrowPcgEdgeKind::BorrowFlow(flow)
-                if matches!(flow.kind(), BorrowFlowEdgeKind::Aggregate { .. })
-        );
+        let expired = matches!(edge, BorrowPcgEdgeKind::Aggregate(_));
         for place in self.places_with_dead_lifetime_projections(edge) {
             if !self.reference_in_use(place) {
                 self.weaken_place_with_dead_lifetime_projection(place, expired)?;

@@ -4,7 +4,10 @@ use crate::{
         GeneralizedLifetime,
         action::LabelPlaceReason,
         borrow_pcg_edge::BorrowPcgEdge,
-        edge::borrow_flow::{BorrowFlowEdge, BorrowFlowEdgeKind},
+        edge::{
+            aggregate::AggregateEdge,
+            borrow_flow::{BorrowFlowEdge, BorrowFlowEdgeKind},
+        },
         region_projection::{LifetimeProjection, PcgLifetimeProjectionLike, PlaceOrConst},
     },
     owned_pcg::RepackExpand,
@@ -219,6 +222,53 @@ impl<'pcg, 'a, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>> PcgVisitor<'pcg, 'a, 'tcx
                     target_proj.into(),
                     ctxt,
                 )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// As [`Self::connect_outliving_projections`] for the lifetime projections
+    /// of the parts of an aggregate assigned to `target`, with one
+    /// [`AggregateEdge`] per lifetime projection of `target` from all
+    /// projections in `sources` that outlive it.
+    fn connect_aggregate(
+        &mut self,
+        sources: &[LifetimeProjection<'tcx, PlaceOrConst<'tcx, MaybeLabelledPlace<'tcx>>>],
+        target: Place<'tcx>,
+    ) -> Result<(), PcgError> {
+        let ctxt = self.ctxt;
+        for target_proj in target.lifetime_projections(self.ctxt) {
+            let outliving = sources
+                .iter()
+                .filter(|source_proj| {
+                    self.outlives_generalized(
+                        source_proj.region(ctxt.ctxt()),
+                        target_proj.region(ctxt.ctxt()),
+                    )
+                })
+                .map(|source_proj| source_proj.to_pcg_lifetime_projection())
+                .collect::<Vec<_>>();
+            if !outliving.is_empty() {
+                self.record_and_apply_action(
+                    BorrowPcgAction::add_edge(
+                        BorrowPcgEdge::new(
+                            AggregateEdge::new(outliving, target_proj.into()).into(),
+                            self.pcg.borrow.validity_conditions.clone(),
+                        ),
+                        "connect_aggregate",
+                    )
+                    .into(),
+                )?;
+            }
+            for source_proj in sources {
+                if let PlaceOrConst::Place(base) = source_proj.base {
+                    let local_source_proj = source_proj.with_base(base);
+                    self.place_obtainer().redirect_source_of_future_edges(
+                        local_source_proj,
+                        target_proj.into(),
+                        ctxt,
+                    )?;
+                }
             }
         }
         Ok(())
