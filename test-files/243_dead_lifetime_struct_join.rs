@@ -32,4 +32,18 @@ fn local<'a>(t: T<'a>) -> Option<&'a i32> {
     if u.valid { Some(u.ctx.row()) } else { None }
 }
 
+struct W<'a> {
+    f: &'a mut i32,
+}
+
+fn written(w: W<'_>, c: bool) {
+    // Removing the expansion of `w`'s lifetime projection hands the loans of
+    // `w.f` back, so `w.f` is weakened instead of being packed back into `w`.
+    // PCG: bb1[1] pre_operands: Weaken w.f from E to W
+    // ~PCG: bb1[1] pre_operands: aggregate
+    if c {
+        *w.f = 1;
+    }
+}
+
 fn main() {}
