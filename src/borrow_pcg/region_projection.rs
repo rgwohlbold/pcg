@@ -559,7 +559,7 @@ impl<P, Kind: RegionIdxMarker> LifetimeProjection<'_, P, Kind> {
     pub(crate) fn is_future(&self) -> bool {
         self.label == Some(LifetimeProjectionLabel::Future)
     }
-    pub(crate) fn label(&self) -> Option<LifetimeProjectionLabel> {
+    pub fn label(&self) -> Option<LifetimeProjectionLabel> {
         self.label
     }
 }
