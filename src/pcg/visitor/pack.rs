@@ -143,18 +143,24 @@ impl<'pcg, 'a: 'pcg, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx> + DebugCtxt>
             if edges_to_remove.is_empty() {
                 break self.finish_weakening_places_with_dead_lifetime_projections(&removed_edges);
             }
-            for action in edges_to_remove.removal_actions() {
-                match action {
-                    RemovalAction::RemoveDerefEdgesTo(place, edges, reason) => {
-                        self.remove_deref_edges_to(place, edges, &reason)?;
-                    }
-                    RemovalAction::RemoveOtherEdge(borrow_pcg_edge, reason) => {
-                        self.remove_edge_and_perform_associated_state_updates(
-                            &borrow_pcg_edge,
-                            &reason,
-                        )?;
-                        removed_edges.push(borrow_pcg_edge);
-                    }
+            // A removal can label places, renaming other edges (removing a
+            // deref edge labels the dereferenced place), so the leaves are
+            // identified again after each removal.
+            let action = edges_to_remove
+                .removal_actions()
+                .into_iter()
+                .next()
+                .unwrap();
+            match action {
+                RemovalAction::RemoveDerefEdgesTo(place, edges, reason) => {
+                    self.remove_deref_edges_to(place, edges, &reason)?;
+                }
+                RemovalAction::RemoveOtherEdge(borrow_pcg_edge, reason) => {
+                    self.remove_edge_and_perform_associated_state_updates(
+                        &borrow_pcg_edge,
+                        &reason,
+                    )?;
+                    removed_edges.push(borrow_pcg_edge);
                 }
             }
             if iteration % 10 == 0 {
