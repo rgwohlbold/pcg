@@ -38,6 +38,18 @@ pub struct BorrowFlowEdge<'tcx, P = Place<'tcx>> {
     pub(crate) kind: BorrowFlowEdgeKind<'tcx>,
 }
 
+impl BorrowFlowEdgeKind<'_> {
+    /// Whether the edge is of the form `x.f|'a -> x|'a at FUTURE`: once the
+    /// future node becomes current, it consists of the expansion's parts.
+    #[must_use]
+    pub fn is_future_from_expansion(&self) -> bool {
+        matches!(
+            self,
+            BorrowFlowEdgeKind::Future(private::FutureEdgeKind::FromExpansion)
+        )
+    }
+}
+
 impl<P> BorrowFlowEdge<'_, P> {
     pub(crate) fn future_edge_kind(self) -> Option<private::FutureEdgeKind> {
         if let BorrowFlowEdgeKind::Future(future_edge_kind) = self.kind {
