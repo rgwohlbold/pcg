@@ -412,16 +412,18 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
     }
 
     /// The current places whose lifetime projections `edge` is blocked by and
-    /// are dead. Dereferences and expansions do not leave a place's lifetime
-    /// projection dead.
+    /// are dead. Dereferences do not leave a place's lifetime projection dead.
+    ///
+    /// Removing the expansion of a lifetime projection hands the parts' loans
+    /// back to the expanded projection, so a part whose projection is dead
+    /// holds nothing anymore. Its place must not be packed back with
+    /// exclusive capability, which would make the expanded place hold those
+    /// loans a second time.
     fn places_with_dead_lifetime_projections(
         &self,
         edge: &BorrowPcgEdgeKind<'tcx>,
     ) -> HashSet<Place<'tcx>> {
-        if matches!(
-            edge,
-            BorrowPcgEdgeKind::Deref(_) | BorrowPcgEdgeKind::BorrowPcgExpansion(_)
-        ) {
+        if matches!(edge, BorrowPcgEdgeKind::Deref(_)) {
             return HashSet::default();
         }
         edge.blocked_by_nodes(self.ctxt.bc_ctxt())
