@@ -55,7 +55,10 @@ pub mod utils;
 pub mod visualization;
 
 use borrow_checker::BorrowCheckerInterface;
-use borrow_pcg::graph::{borrows_imgcat_debug, loop_abstraction::MaybeRemoteCurrentPlace};
+use borrow_pcg::{
+    edge_data::NodeReplacement,
+    graph::{borrows_imgcat_debug, loop_abstraction::MaybeRemoteCurrentPlace},
+};
 use pcg::{CapabilityKind, EvalStmtPhase, PcgArena, PcgEngine};
 use rustc_interface::{
     borrowck::{self, BorrowSet, LocationTable, PoloniusInput, RegionInferenceContext},
@@ -189,7 +192,10 @@ impl<'a, 'tcx: 'a, Ctxt: HasBorrowCheckerCtxt<'a, 'tcx>> DisplayWithCtxt<Ctxt> f
 pub struct RestoreCapability<'tcx, P = Place<'tcx>> {
     place: P,
     capability: CapabilityKind,
-    _marker: PhantomData<&'tcx ()>,
+    /// The nodes renamed by the restoration, filled in when it is applied:
+    /// restoring exclusive capability makes the future lifetime projections
+    /// of the place current.
+    renamed: Vec<NodeReplacement<'tcx, P>>,
 }
 
 impl<'a, 'tcx: 'a, Ctxt: HasCompilerCtxt<'a, 'tcx>> ToJsonWithCtxt<Ctxt>
@@ -219,17 +225,27 @@ impl<'a, 'tcx: 'a, Ctxt: HasBorrowCheckerCtxt<'a, 'tcx>> DisplayWithCtxt<Ctxt>
     }
 }
 
-impl<P: Copy> RestoreCapability<'_, P> {
+impl<'tcx, P: Copy> RestoreCapability<'tcx, P> {
     pub(crate) fn new(place: P, capability: CapabilityKind) -> Self {
         Self {
             place,
             capability,
-            _marker: PhantomData,
+            renamed: Vec::new(),
         }
     }
 
     pub fn place(&self) -> P {
         self.place
+    }
+
+    /// The nodes renamed by the restoration, e.g. so that a client keeping
+    /// data per node can carry it over to the new names.
+    pub fn renamed_nodes(&self) -> &[NodeReplacement<'tcx, P>] {
+        &self.renamed
+    }
+
+    pub(crate) fn set_renamed(&mut self, renamed: Vec<NodeReplacement<'tcx, P>>) {
+        self.renamed = renamed;
     }
 
     pub fn capability(&self) -> CapabilityKind {

@@ -10,7 +10,7 @@ use std::{borrow::Cow, marker::PhantomData};
 
 use crate::{
     borrow_pcg::{
-        edge_data::{LabelEdgeLifetimeProjections, LabelNodePredicate},
+        edge_data::{LabelEdgeLifetimeProjections, LabelNodePredicate, NodeReplacement},
         has_pcs_elem::LabelLifetimeProjectionResult,
         region_projection::LifetimeProjectionLabel,
         validity_conditions::ValidityConditionOps,
@@ -561,6 +561,64 @@ impl<'tcx, EdgeKind: Eq + std::hash::Hash, VC> BorrowsGraph<'tcx, EdgeKind, VC> 
             ctxt,
         );
         result
+    }
+
+    /// Like [`Self::label_lifetime_projections`], and also returns the nodes
+    /// renamed by the labelling: in each edge, a lifetime projection whose
+    /// label changed.
+    pub(crate) fn label_lifetime_projections_and_report<P, Ctxt: Copy>(
+        &mut self,
+        predicate: &LabelNodePredicate<'tcx, P>,
+        label: Option<LifetimeProjectionLabel>,
+        ctxt: Ctxt,
+    ) -> (bool, HashSet<NodeReplacement<'tcx, P>>)
+    where
+        P: Copy + Eq + std::hash::Hash,
+        EdgeKind: LabelEdgeLifetimeProjections<'tcx, Ctxt, P> + EdgeData<'tcx, Ctxt, P>,
+        VC: ValidityConditionOps<Ctxt>,
+    {
+        fn nodes<'tcx, P, Ctxt, E: EdgeData<'tcx, Ctxt, P>>(
+            edge: &E,
+            ctxt: Ctxt,
+        ) -> HashSet<PcgNodeWithPlace<'tcx, P>>
+        where
+            P: Copy + Eq + std::hash::Hash,
+            Ctxt: Copy,
+        {
+            edge.blocked_nodes(ctxt)
+                .chain(edge.blocked_by_nodes(ctxt).map(Into::into))
+                .collect()
+        }
+        let mut changed = false;
+        let mut renamed = HashSet::default();
+        self.filter_mut_edges(
+            |edge| {
+                let before = nodes(&edge.value, ctxt);
+                let result: LabelLifetimeProjectionResult = edge
+                    .value
+                    .label_lifetime_projections(predicate, label, ctxt);
+                if result != LabelLifetimeProjectionResult::Unchanged {
+                    changed = true;
+                    let after = nodes(&edge.value, ctxt);
+                    for to in after.difference(&before) {
+                        let PcgNode::LifetimeProjection(to_rp) = to else {
+                            continue;
+                        };
+                        for from in before.difference(&after) {
+                            if let PcgNode::LifetimeProjection(from_rp) = from
+                                && from_rp.base == to_rp.base
+                                && from_rp.region_idx == to_rp.region_idx
+                            {
+                                renamed.insert(NodeReplacement::new(*from, *to));
+                            }
+                        }
+                    }
+                }
+                result.to_filter_mut_result()
+            },
+            ctxt,
+        );
+        (changed, renamed)
     }
 }
 impl<'tcx, EdgeKind: Eq + std::hash::Hash, VC> BorrowsGraph<'tcx, EdgeKind, VC> {

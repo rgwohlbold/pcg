@@ -29,10 +29,10 @@ impl HasSnapshotLocation for JoinObtainer<'_, '_, '_, '_, '_> {
 impl<'tcx> ActionApplier<'tcx> for JoinObtainer<'_, '_, '_, '_, 'tcx> {
     fn apply_action(&mut self, action: PcgAction<'tcx>) -> Result<(), PcgError> {
         match action {
-            PcgAction::Borrow(action) => {
+            PcgAction::Borrow(mut action) => {
                 self.data
                     .borrows
-                    .apply_action(action.clone(), self.data.capabilities, self.ctxt);
+                    .apply_action(&mut action, self.data.capabilities, self.ctxt);
             }
             PcgAction::Owned(action) => match action.kind {
                 RepackOp::Collapse(collapse) => {
