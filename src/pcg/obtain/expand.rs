@@ -346,6 +346,21 @@ pub(crate) trait PlaceExpander<'a, 'tcx: 'a>:
                         ctxt.bc_ctxt(),
                     );
                 }
+                // The base's other occurrences are labelled before the
+                // expansion is added, so that the renaming precedes the edge
+                // that refers to the new name.
+                if let LabelForLifetimeProjection::NewLabelAtCurrentLocation(label) =
+                    expansion_label
+                {
+                    self.apply_action(
+                        BorrowPcgAction::label_lifetime_projection(
+                            LabelNodePredicate::equals_lifetime_projection(base_rp.into()),
+                            Some(label.into()),
+                            "expand_region_projections_one_level: create new RP label",
+                        )
+                        .into(),
+                    )?;
+                }
                 self.apply_action(
                     BorrowPcgAction::add_edge(
                         BorrowPcgEdge::new(
@@ -359,15 +374,6 @@ pub(crate) trait PlaceExpander<'a, 'tcx: 'a>:
                 if let LabelForLifetimeProjection::NewLabelAtCurrentLocation(label) =
                     expansion_label
                 {
-                    self.apply_action(
-                        BorrowPcgAction::label_lifetime_projection(
-                            LabelNodePredicate::equals_lifetime_projection(base_rp.into()),
-                            Some(label.into()),
-                            "expand_region_projections_one_level: create new RP label",
-                        )
-                        .into(),
-                    )?;
-
                     // Don't add placeholder edges for owned expansions, unless it's a deref
                     if base.as_borrowed_place(ctxt).is_some() || base.is_mut_ref(ctxt) {
                         let old_rp_base = base_rp.with_label(Some(label.into()), ctxt);
