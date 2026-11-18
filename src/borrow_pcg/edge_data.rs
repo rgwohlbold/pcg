@@ -361,6 +361,16 @@ impl<'tcx, P: Copy + Eq + std::hash::Hash> NodeReplacement<'tcx, P> {
     pub(crate) fn new(from: PcgNodeWithPlace<'tcx, P>, to: PcgNodeWithPlace<'tcx, P>) -> Self {
         Self { from, to }
     }
+
+    /// The node before the renaming.
+    pub fn from(&self) -> PcgNodeWithPlace<'tcx, P> {
+        self.from
+    }
+
+    /// The node after the renaming.
+    pub fn to(&self) -> PcgNodeWithPlace<'tcx, P> {
+        self.to
+    }
 }
 
 impl<'tcx, Ctxt: Copy, P: Eq + std::hash::Hash + DisplayWithCtxt<Ctxt>> DisplayWithCtxt<Ctxt>

@@ -6,13 +6,14 @@ use crate::{
     HasSettings,
     borrow_pcg::{
         borrow_pcg_expansion::BorrowPcgExpansion,
-        edge_data::LabelNodePredicate,
+        edge_data::{LabelNodePredicate, NodeReplacement},
         state::{BorrowStateMutRef, BorrowsStateLike},
     },
     pcg::CapabilityKind,
     rustc_interface::middle::mir,
     utils::{
         CompilerCtxt, DebugCtxt, HasBorrowCheckerCtxt, HasCompilerCtxt, HasPlace, Place,
+        data_structures::HashSet,
         display::{DebugLines, DisplayWithCompilerCtxt},
         validity::HasValidityCheck,
     },
@@ -352,16 +353,22 @@ where
         capability: CapabilityKind,
         mut borrows: BorrowStateMutRef<'_, 'tcx>,
         ctxt: Ctxt,
-    ) where
+    ) -> HashSet<NodeReplacement<'tcx>>
+    where
         'tcx: 'a,
     {
         self.insert((*place).into(), capability, ctxt);
         if capability == CapabilityKind::Exclusive {
-            borrows.label_lifetime_projections(
-                &LabelNodePredicate::all_future_postfixes(place),
-                None,
-                ctxt,
-            );
+            borrows
+                .graph_mut()
+                .label_lifetime_projections_and_report(
+                    &LabelNodePredicate::all_future_postfixes(place),
+                    None,
+                    ctxt,
+                )
+                .1
+        } else {
+            HashSet::default()
         }
     }
 

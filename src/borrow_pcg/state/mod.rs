@@ -7,7 +7,10 @@ use crate::{
     borrow_pcg::{
         action::ApplyActionResult,
         borrow_pcg_edge::{BlockingNode, LocalNode},
-        edge_data::{LabelEdgeLifetimeProjections, LabelEdgePlaces, display_node_replacements},
+        edge_data::{
+            LabelEdgeLifetimeProjections, LabelEdgePlaces, NodeReplacement,
+            display_node_replacements,
+        },
         graph::join::JoinBorrowsArgs,
         region_projection::PcgLifetimeProjectionBase,
         validity_conditions::{
@@ -42,7 +45,7 @@ use crate::{
         },
         edge_data::{EdgeData, LabelNodePredicate},
         has_pcs_elem::{PlaceLabeller, SetLabel},
-        region_projection::{LifetimeProjection, LifetimeProjectionLabel},
+        region_projection::LifetimeProjection,
     },
     pcg::{
         CapabilityKind, PcgNode, ctxt::AnalysisCtxt, place_capabilities::PlaceCapabilitiesInterface,
@@ -200,7 +203,7 @@ pub(crate) trait BorrowsStateLike<'tcx, EdgeKind = BorrowPcgEdgeKind<'tcx>, VC =
         labeller: &impl PlaceLabeller<'tcx, Ctxt, P>,
         capabilities: &mut impl PlaceCapabilitiesInterface<'tcx, C, P>,
         ctxt: Ctxt,
-    ) -> ApplyActionResult
+    ) -> (ApplyActionResult, HashSet<NodeReplacement<'tcx, P>>)
     where
         'tcx: 'a,
         EdgeKind: LabelEdgePlaces<'tcx, Ctxt, P> + Eq + std::hash::Hash,
@@ -216,25 +219,13 @@ pub(crate) trait BorrowsStateLike<'tcx, EdgeKind = BorrowPcgEdgeKind<'tcx>, VC =
             capabilities.retain(|p, _| !p.projects_indirection_from(place, ctxt));
         }
         let display = display_node_replacements(&replacements, ctxt, OutputMode::Normal);
-        ApplyActionResult {
-            changed: true,
-            change_summary: display,
-        }
-    }
-
-    fn label_lifetime_projections<'a, P, Ctxt: Copy>(
-        &mut self,
-        predicate: &LabelNodePredicate<'tcx, P>,
-        label: Option<LifetimeProjectionLabel>,
-        ctxt: Ctxt,
-    ) -> bool
-    where
-        'tcx: 'a,
-        EdgeKind: LabelEdgeLifetimeProjections<'tcx, Ctxt, P> + Eq + std::hash::Hash,
-        VC: ValidityConditionOps<Ctxt>,
-    {
-        self.graph_mut()
-            .label_lifetime_projections(predicate, label, ctxt)
+        (
+            ApplyActionResult {
+                changed: true,
+                change_summary: display,
+            },
+            replacements,
+        )
     }
 
     fn remove<'a, P: Copy + Eq + std::hash::Hash, Ctxt: Copy, C>(
@@ -267,7 +258,7 @@ pub(crate) trait BorrowsStateLike<'tcx, EdgeKind = BorrowPcgEdgeKind<'tcx>, VC =
         P: PlaceLike<'tcx, Ctxt> + DisplayWithCtxt<Ctxt>,
     >(
         &mut self,
-        action: BorrowPcgAction<'tcx, EdgeKind, P, VC>,
+        action: &mut BorrowPcgAction<'tcx, EdgeKind, P, VC>,
         capabilities: &mut impl PlaceCapabilitiesInterface<'tcx, CapabilityKind, P>,
         ctxt: Ctxt,
     ) -> ApplyActionResult
@@ -277,11 +268,13 @@ pub(crate) trait BorrowsStateLike<'tcx, EdgeKind = BorrowPcgEdgeKind<'tcx>, VC =
         EdgeKind: EdgeData<'tcx, Ctxt, P>
             + LabelEdgePlaces<'tcx, Ctxt, P>
             + LabelEdgeLifetimeProjections<'tcx, Ctxt, P>
+            + Clone
             + Eq
             + std::hash::Hash,
+        VC: Clone,
         MaybeRemotePlace<'tcx, P>: DisplayWithCtxt<Ctxt>,
     {
-        match action.kind {
+        match &mut action.kind {
             BorrowPcgActionKind::Restore(restore) => {
                 let restore_place = restore.place();
                 if let Some(cap) = capabilities.get(restore_place, ctxt) {
@@ -291,11 +284,12 @@ pub(crate) trait BorrowsStateLike<'tcx, EdgeKind = BorrowPcgEdgeKind<'tcx>, VC =
                     // panic!("Capability should have been updated")
                 }
                 if restore.capability() == CapabilityKind::Exclusive {
-                    self.label_lifetime_projections(
+                    let (_, renamed) = self.graph_mut().label_lifetime_projections_and_report(
                         &LabelNodePredicate::all_future_postfixes(restore_place),
                         None,
                         ctxt,
                     );
+                    restore.set_renamed(renamed.into_iter().collect());
                 }
                 ApplyActionResult::changed_no_display()
             }
@@ -318,27 +312,32 @@ pub(crate) trait BorrowsStateLike<'tcx, EdgeKind = BorrowPcgEdgeKind<'tcx>, VC =
                 }
                 ApplyActionResult::changed_no_display()
             }
-            BorrowPcgActionKind::LabelPlace(action) => self
-                .label_place_and_update_related_capabilities(
+            BorrowPcgActionKind::LabelPlace(action) => {
+                let (result, renamed) = self.label_place_and_update_related_capabilities(
                     action.place,
                     action.reason,
                     &SetLabel(action.location),
                     capabilities,
                     ctxt,
-                ),
+                );
+                action.renamed = renamed.into_iter().collect();
+                result
+            }
             BorrowPcgActionKind::RemoveEdge(edge) => {
                 ApplyActionResult::from_changed(self.remove(&edge.value, capabilities, ctxt))
             }
             BorrowPcgActionKind::AddEdge { edge } => {
-                ApplyActionResult::from_changed(self.graph_mut().insert(edge, ctxt))
+                ApplyActionResult::from_changed(self.graph_mut().insert(edge.clone(), ctxt))
             }
             BorrowPcgActionKind::LabelLifetimeProjection(action) => {
                 let predicate = map_label_predicate(action.predicate());
-                ApplyActionResult::from_changed(self.label_lifetime_projections(
+                let (changed, renamed) = self.graph_mut().label_lifetime_projections_and_report(
                     &predicate,
                     action.label(),
                     ctxt,
-                ))
+                );
+                action.set_renamed(renamed.into_iter().collect());
+                ApplyActionResult::from_changed(changed)
             }
         }
     }
@@ -447,7 +446,7 @@ impl<'a, 'tcx> BorrowsState<'a, 'tcx, BorrowPcgEdgeKind<'tcx>, ValidityCondition
             .unwrap();
             assert!(
                 self.apply_action(
-                    BorrowPcgAction::add_edge(
+                    &mut BorrowPcgAction::add_edge(
                         BorrowPcgEdge::new(
                             BorrowFlowEdge::new(
                                 source_projection,

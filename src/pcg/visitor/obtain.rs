@@ -595,13 +595,16 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
 
     pub(crate) fn record_and_apply_action(
         &mut self,
-        action: PcgAction<'tcx>,
+        mut action: PcgAction<'tcx>,
     ) -> Result<(), PcgError>
     where
         Ctxt: HasBorrowCheckerCtxt<'a, 'tcx> + HasSettings<'a>,
     {
         tracing::debug!("Applying Action: {}", action.debug_line(self.ctxt));
-        let result = match &action {
+        // Applying a label action records the nodes it renamed in it. A
+        // regain records them in a label action following it.
+        let mut regained_renames = None;
+        let result = match &mut action {
             PcgAction::Borrow(action) => {
                 // An expansion guided by the index local outlives the local's
                 // value: its guide refers to the value at the label instead.
@@ -622,16 +625,19 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
                 }
                 self.pcg
                     .borrow
-                    .apply_action(action.clone(), self.pcg.place_capabilities, self.ctxt)
+                    .apply_action(action, self.pcg.place_capabilities, self.ctxt)
             }
             PcgAction::Owned(owned_action) => match owned_action.kind {
                 RepackOp::RegainLoanedCapability(regained_capability) => {
-                    self.pcg.place_capabilities.regain_loaned_capability(
+                    let renamed = self.pcg.place_capabilities.regain_loaned_capability(
                         regained_capability.place,
                         regained_capability.capability,
                         self.pcg.borrow.as_mut_ref(),
                         self.ctxt,
                     );
+                    if !renamed.is_empty() {
+                        regained_renames = Some((regained_capability.place, renamed));
+                    }
                     ApplyActionResult::changed_no_display()
                 }
                 RepackOp::Expand(expand) => {
@@ -685,23 +691,40 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
         let location = self.location();
         #[cfg(feature = "visualization")]
         let phase = self.phase();
-        if let Some(actions) = &mut self.actions {
-            #[cfg(feature = "visualization")]
-            if let Some(analysis_ctxt) = self.ctxt.try_into_analysis_ctxt()
-                && let Some(phase) = phase
-            {
-                let pcg_ref = PcgRef {
-                    borrow: self.pcg.borrow.as_ref(),
-                    place_capabilities: self.pcg.place_capabilities,
-                    owned: self.pcg.owned,
-                };
-                analysis_ctxt.generate_pcg_debug_visualization_graph(
-                    location,
-                    stmt_graphs::ToGraph::Action(phase, actions.len()),
-                    pcg_ref,
-                );
+        let mut applied = vec![AppliedAction::new(action, result)];
+        if let Some((place, renamed)) = regained_renames {
+            let mut label = BorrowPcgAction::label_lifetime_projection(
+                LabelNodePredicate::all_future_postfixes(place),
+                None,
+                "The regained place's future lifetime projections are current",
+            );
+            if let BorrowPcgActionKind::LabelLifetimeProjection(label) = &mut label.kind {
+                label.set_renamed(renamed.into_iter().collect());
             }
-            actions.push(AppliedAction::new(action, result));
+            applied.push(AppliedAction::new(
+                PcgAction::Borrow(label),
+                ApplyActionResult::changed_no_display(),
+            ));
+        }
+        if let Some(actions) = &mut self.actions {
+            for applied in applied {
+                #[cfg(feature = "visualization")]
+                if let Some(analysis_ctxt) = self.ctxt.try_into_analysis_ctxt()
+                    && let Some(phase) = phase
+                {
+                    let pcg_ref = PcgRef {
+                        borrow: self.pcg.borrow.as_ref(),
+                        place_capabilities: self.pcg.place_capabilities,
+                        owned: self.pcg.owned,
+                    };
+                    analysis_ctxt.generate_pcg_debug_visualization_graph(
+                        location,
+                        stmt_graphs::ToGraph::Action(phase, actions.len()),
+                        pcg_ref,
+                    );
+                }
+                actions.push(applied);
+            }
         }
         Ok(())
     }
