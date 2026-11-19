@@ -476,6 +476,10 @@ impl<'a, 'tcx: 'a> Pcg<'a, 'tcx> {
         ctxt: impl DataflowCtxt<'a, 'tcx>,
     ) -> Result<PcgActions<'tcx>, PcgError> {
         let mut expansions = Vec::new();
+        // The lifetime projections of owned places expanded at the loop head:
+        // `join_owned` expands the places themselves, but not their lifetime
+        // projections.
+        let mut owned_lifetime_expansions = Vec::new();
         for edge in other.borrow.graph().edges() {
             let conditions = edge.conditions.without_branch_choice(self_block);
             // The guide is kept: the target place does not carry the label of
@@ -490,6 +494,21 @@ impl<'a, 'tcx: 'a> Pcg<'a, 'tcx> {
                     };
                     (expansion.base(), *target, expansion.guide)
                 }
+                BorrowPcgEdgeKind::BorrowPcgExpansion(BorrowPcgExpansion::LifetimeProjection(
+                    expansion,
+                )) => {
+                    if let (Some(base), Some(target)) = (
+                        expansion.base().base().as_current_place(),
+                        expansion
+                            .expansion()
+                            .first()
+                            .and_then(|target| target.base().as_current_place()),
+                    ) && base.as_owned_place(ctxt).is_some()
+                    {
+                        owned_lifetime_expansions.push((base, target, conditions));
+                    }
+                    continue;
+                }
                 _ => continue,
             };
             if let (Some(base), Some(target)) = (base.as_current_place(), target.as_current_place())
@@ -497,9 +516,32 @@ impl<'a, 'tcx: 'a> Pcg<'a, 'tcx> {
                 expansions.push((base, target, guide, conditions));
             }
         }
-        expansions.sort_by_key(|(base, _, _, _)| base.projection.len());
+        // A place expansion or deref replayed below expands the lifetime
+        // projections of its base itself, and one expansion of a base
+        // expands all its lifetime projections.
+        owned_lifetime_expansions.retain(|(base, _, _)| {
+            !expansions
+                .iter()
+                .any(|(other_base, _, _, _)| other_base == base)
+        });
+        owned_lifetime_expansions.sort_by_key(|(base, target, _)| (*base, *target));
+        owned_lifetime_expansions.dedup_by_key(|(base, _, _)| *base);
+        let mut expansions = expansions
+            .into_iter()
+            .map(|(base, target, guide, conditions)| (base, target, guide, conditions, false))
+            .chain(
+                owned_lifetime_expansions
+                    .into_iter()
+                    .map(|(base, target, conditions)| (base, target, None, conditions, true)),
+            )
+            .collect::<Vec<_>>();
+        expansions.sort_by_key(|(base, _, _, _, _)| base.projection.len());
         let mut applied = AppliedActions::default();
-        for (base, target, guide, conditions) in expansions {
+        for (base, target, guide, conditions, lifetimes_only) in expansions {
+            // On a back edge, the expansion is still there from the loop head.
+            if lifetimes_only && self.contains_lifetime_projection_expansion(base, target) {
+                continue;
+            }
             let usage_type =
                 if other.place_capabilities.get(base, ctxt) == Some(CapabilityKind::Read) {
                     PlaceUsageType::Read
@@ -549,7 +591,9 @@ impl<'a, 'tcx: 'a> Pcg<'a, 'tcx> {
                     }
                 }
             }
-            if obtainer.expand_place_one_level(base, &expansion, guide, obtain_type, ctxt)? {
+            if lifetimes_only
+                || obtainer.expand_place_one_level(base, &expansion, guide, obtain_type, ctxt)?
+            {
                 // The bridge replays the loop head's expansions, which stand
                 // for the whole loop body, so every projection may change.
                 obtainer.expand_lifetime_projections_one_level(
@@ -564,6 +608,27 @@ impl<'a, 'tcx: 'a> Pcg<'a, 'tcx> {
         Ok(PcgActions::new(
             applied.actions.into_iter().map(|a| a.action).collect(),
         ))
+    }
+
+    /// Whether a lifetime projection of `base` is expanded to one of `target`.
+    fn contains_lifetime_projection_expansion(
+        &self,
+        base: Place<'tcx>,
+        target: Place<'tcx>,
+    ) -> bool {
+        self.borrow.graph().edges().any(|edge| {
+            let BorrowPcgEdgeKind::BorrowPcgExpansion(BorrowPcgExpansion::LifetimeProjection(
+                expansion,
+            )) = edge.kind()
+            else {
+                return false;
+            };
+            expansion.base().base().as_current_place() == Some(base)
+                && expansion
+                    .expansion()
+                    .iter()
+                    .any(|node| node.base().as_current_place() == Some(target))
+        })
     }
 
     #[tracing::instrument(skip(self, other, ctxt))]
