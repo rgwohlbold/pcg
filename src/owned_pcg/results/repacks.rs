@@ -46,6 +46,17 @@ impl IndexLocal {
     }
 }
 
+impl<Local, D, Default> RepackGuide<Local, D, Default> {
+    /// Whether an expansion with this guide covers only part of the place: an
+    /// element or a subslice of an array or slice.
+    pub(crate) fn is_partial(&self) -> bool {
+        matches!(
+            self,
+            RepackGuide::ConstantIndex(..) | RepackGuide::Index(..) | RepackGuide::Subslice { .. }
+        )
+    }
+}
+
 impl<D, Default> RepackGuide<IndexLocal, D, Default> {
     /// Labels an `Index` guide of `index` with `label`, unless already
     /// labelled: the first overwrite or death of the local after the expansion

@@ -10,6 +10,7 @@ use crate::{
         edge_data::EdgeData,
         graph::{Conditioned, frozen::FrozenGraphRef},
     },
+    owned_pcg::RepackGuide,
     pcg::{
         CapabilityKind, PcgNode, PcgRefLike,
         obtain::{PlaceCollapser, PlaceObtainer},
@@ -433,9 +434,38 @@ impl<'pcg, 'a: 'pcg, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx> + DebugCtxt>
         let mut edges_to_remove = EdgesToRemove::new();
         let fg = self.pcg.borrow.graph.frozen_graph();
         let location = self.location();
+        // The expansion of a lifetime projection by a part of its place whose
+        // contents were overwritten, e.g. `{y↓'a before L} -> {y[_4] before
+        // L'↓'a}` after `y[_4] = r`, is the only link from the place to the
+        // projection's contents before the write, which hold the rest of the
+        // place. It is kept until the place's expansion is collapsed, which
+        // joins the rest into the new projection (see
+        // `collapse_owned_places_and_lifetime_projections_to`).
+        let is_joined_at_collapse = |expansion: &BorrowPcgExpansion<'tcx>| {
+            let BorrowPcgExpansion::LifetimeProjection(expansion) = expansion else {
+                return false;
+            };
+            let Some(guide) = expansion.guide.filter(RepackGuide::is_partial) else {
+                return false;
+            };
+            if !expansion.expansion.iter().all(|node| node.base.is_old()) {
+                return false;
+            }
+            let Some(place) = expansion.base.base.as_current_place() else {
+                return false;
+            };
+            let owned = &self.pcg.owned[place.local];
+            owned.is_allocated()
+                && owned
+                    .expansions()
+                    .expansions_from((*place).into())
+                    .any(|expanded| expanded.guide() == Some(guide))
+        };
         let should_pack_edge = |edge: &BorrowPcgEdgeKind<'tcx>| {
             if let BorrowPcgEdgeKind::BorrowPcgExpansion(expansion) = edge {
-                if !ancestor_predicate_allows_killing(expansion.base()) {
+                if !ancestor_predicate_allows_killing(expansion.base())
+                    || is_joined_at_collapse(expansion)
+                {
                     return ShouldPackEdge::No;
                 }
                 if expansion.expansion().iter().all(|node| {
