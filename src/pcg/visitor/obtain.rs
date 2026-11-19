@@ -974,6 +974,20 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
 
         self.expand_to(place, obtain_type, self.ctxt)?;
 
+        // The expansion may have created the lifetime projections of `place`,
+        // which step 1 could not label yet: they hold the contents that the
+        // write replaces.
+        if obtain_cap.is_write() {
+            self.record_and_apply_action(
+                BorrowPcgAction::label_place_and_update_related_capabilities(
+                    place,
+                    self.prev_snapshot_location(),
+                    LabelPlaceReason::Write,
+                )
+                .into(),
+            )?;
+        }
+
         if obtain_type == ObtainType::ForStorageDead
             && let Some(cap @ (CapabilityKind::Exclusive | CapabilityKind::ShallowExclusive)) =
                 self.pcg.capability_of(place, self.ctxt)
