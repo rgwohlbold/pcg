@@ -48,6 +48,16 @@ impl BorrowFlowEdgeKind<'_> {
             BorrowFlowEdgeKind::Future(private::FutureEdgeKind::FromExpansion)
         )
     }
+
+    /// Whether the edge is of the form `x|'a at loc -> x|'a at FUTURE`: once
+    /// the future node becomes current, it is the labelled node again.
+    #[must_use]
+    pub fn is_future_to_self(&self) -> bool {
+        matches!(
+            self,
+            BorrowFlowEdgeKind::Future(private::FutureEdgeKind::ToFutureSelf)
+        )
+    }
 }
 
 impl<P> BorrowFlowEdge<'_, P> {
