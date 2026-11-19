@@ -8,8 +8,12 @@ use crate::{
     borrow_pcg::{
         GeneralizedLifetime,
         action::LabelPlaceReason,
-        borrow_pcg_edge::BorrowPcgEdge,
-        edge::{aggregate::AggregateEdge, kind::BorrowPcgEdgeType},
+        borrow_pcg_edge::{BorrowPcgEdge, BorrowPcgEdgeLike},
+        borrow_pcg_expansion::BorrowPcgExpansion,
+        edge::{
+            aggregate::AggregateEdge,
+            kind::{BorrowPcgEdgeKind, BorrowPcgEdgeType},
+        },
         edge_data::LabelNodePredicate,
         has_pcs_elem::{LabelNodeContext, SetLabel, SourceOrTarget},
         region_projection::LocalLifetimeProjection,
@@ -17,9 +21,9 @@ use crate::{
     },
     error::PcgError,
     r#loop::PlaceUsageType,
-    owned_pcg::{LocalExpansions, RepackCollapse, RepackOp},
+    owned_pcg::{LocalExpansions, RepackCollapse, RepackGuide, RepackOp},
     pcg::{
-        CapabilityKind, LabelPlaceConditionally, PcgMutRef, PcgRefLike,
+        CapabilityKind, LabelPlaceConditionally, PcgMutRef, PcgNode, PcgRefLike,
         ctxt::AnalysisCtxt,
         place_capabilities::{PlaceCapabilities, PlaceCapabilitiesReader},
     },
@@ -305,8 +309,19 @@ pub(crate) trait PlaceCollapser<'a, 'tcx: 'a>:
                                 .collect::<Vec<_>>()
                         })
                         .collect();
+                    let rest = match pe.guide() {
+                        Some(guide) if guide.is_partial() => {
+                            self.remove_partial_lifetime_projection_expansion(rp.into(), guide)?
+                        }
+                        _ => None,
+                    };
                     if capability.is_exclusive() {
-                        self.create_aggregate_lifetime_projections(rp.into(), &rp_expansion, ctxt)?;
+                        self.create_aggregate_lifetime_projections(
+                            rp.into(),
+                            rest,
+                            &rp_expansion,
+                            ctxt,
+                        )?;
                     }
                 }
             }
@@ -376,16 +391,59 @@ pub(crate) trait PlaceCollapser<'a, 'tcx: 'a>:
         Ok(())
     }
 
-    /// Only for owned places.
+    /// Removes the expansion of `rp` by a part of its place with `guide` whose
+    /// contents were overwritten, which is kept until the place's expansion is
+    /// collapsed. Returns the expansion's base if it is labelled: `rp`'s
+    /// contents before the write, which hold the rest of the place.
+    fn remove_partial_lifetime_projection_expansion(
+        &mut self,
+        rp: LocalLifetimeProjection<'tcx>,
+        guide: RepackGuide,
+    ) -> Result<Option<LocalLifetimeProjection<'tcx>>, PcgError> {
+        let edges = self
+            .borrows_state()
+            .graph
+            .edges()
+            .filter(|edge| {
+                matches!(
+                    edge.kind,
+                    BorrowPcgEdgeKind::BorrowPcgExpansion(BorrowPcgExpansion::LifetimeProjection(
+                        expansion
+                    )) if expansion.guide == Some(guide)
+                        && expansion.base.base == rp.base
+                        && expansion.base.region_idx == rp.region_idx
+                        && expansion.expansion.iter().all(|node| node.base.is_old())
+                )
+            })
+            .map(BorrowPcgEdgeLike::to_owned_edge)
+            .collect::<Vec<_>>();
+        let mut rest = None;
+        for edge in edges {
+            if let BorrowPcgEdgeKind::BorrowPcgExpansion(expansion) = edge.kind()
+                && let PcgNode::LifetimeProjection(base) = expansion.base()
+                && base.label().is_some()
+            {
+                rest = Some(base);
+            }
+            self.apply_action(
+                BorrowPcgAction::remove_edge(edge, "collapse of a partial expansion").into(),
+            )?;
+        }
+        Ok(rest)
+    }
+
+    /// Only for owned places. `rest` holds the contents of `base` that the
+    /// `expansion`, an expansion by a part of the place, does not.
     fn create_aggregate_lifetime_projections<
         Ctxt: HasBorrowCheckerCtxt<'a, 'tcx> + DebugCtxt + HasSettings<'a>,
     >(
         &mut self,
         base: LocalLifetimeProjection<'tcx>,
+        rest: Option<LocalLifetimeProjection<'tcx>>,
         expansion: &[LocalLifetimeProjection<'tcx>],
         ctxt: Ctxt,
     ) -> Result<(), PcgError> {
-        let mut sources = Vec::new();
+        let mut sources = rest.into_iter().map(Into::into).collect::<Vec<_>>();
         for node in expansion {
             if let Some(place) = node.base.as_current_place() {
                 let labeller = SetLabel(self.prev_snapshot_location());
