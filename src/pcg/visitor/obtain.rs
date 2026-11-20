@@ -478,20 +478,26 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
         Ok(())
     }
 
-    /// Whether the graph still dereferences `place`, reaches it by a
-    /// dereference of its parent (whose removal packs `place` back into the
-    /// parent), or contains the borrow assigned to it.
+    /// Whether the graph still dereferences `place`, reaches it or a place
+    /// it lies in by a dereference (whose removal packs `place` back into the
+    /// reference, e.g. `(*arg).b` into `arg`), or contains the borrow assigned
+    /// to it.
     fn reference_in_use(&self, place: Place<'tcx>) -> bool {
-        let place = MaybeLabelledPlace::Current(place);
+        let current = MaybeLabelledPlace::Current(place);
         self.pcg
             .borrow
             .graph()
             .edges()
             .any(|edge| match edge.kind() {
                 BorrowPcgEdgeKind::Deref(deref) => {
-                    deref.blocked_place == place || deref.deref_place == place
+                    deref.blocked_place == current
+                        || matches!(
+                            deref.deref_place,
+                            MaybeLabelledPlace::Current(deref_place)
+                                if deref_place.is_prefix_of(place)
+                        )
                 }
-                BorrowPcgEdgeKind::Borrow(borrow) => borrow.assigned_ref == place,
+                BorrowPcgEdgeKind::Borrow(borrow) => borrow.assigned_ref == current,
                 _ => false,
             })
     }
