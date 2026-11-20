@@ -478,7 +478,10 @@ pub(crate) trait PlaceCollapser<'a, 'tcx: 'a>:
         expansion: &[LocalLifetimeProjection<'tcx>],
         ctxt: Ctxt,
     ) -> Result<(), PcgError> {
-        let mut sources = rest.into_iter().map(Into::into).collect::<Vec<_>>();
+        let mut sources = rest
+            .into_iter()
+            .map(|rest| (rest.into(), None))
+            .collect::<Vec<_>>();
         for node in expansion {
             if let Some(place) = node.base.as_current_place() {
                 let labeller = SetLabel(self.prev_snapshot_location());
@@ -497,7 +500,7 @@ pub(crate) trait PlaceCollapser<'a, 'tcx: 'a>:
                     LabelNodeContext::new(SourceOrTarget::Source, BorrowPcgEdgeType::Aggregate),
                     ctxt.bc_ctxt(),
                 );
-                sources.push(node.into());
+                sources.push((node.into(), None));
             }
         }
         if !sources.is_empty() {
