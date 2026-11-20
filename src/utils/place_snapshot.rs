@@ -55,6 +55,11 @@ impl AnalysisLocation {
     }
 
     #[must_use]
+    pub fn eval_stmt_phase(&self) -> EvalStmtPhase {
+        self.eval_stmt_phase
+    }
+
+    #[must_use]
     pub fn first(block: BasicBlock) -> Self {
         AnalysisLocation {
             location: Location {
