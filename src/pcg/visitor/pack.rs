@@ -417,6 +417,16 @@ impl<'pcg, 'a: 'pcg, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx> + DebugCtxt>
                             .into(),
                 };
             }
+            // The future node of an argument's place stands for what the place
+            // gets back when a borrow of it ends, which goes back to the caller
+            // at the return: it is kept although the body does not use the
+            // place anymore.
+            if let PcgNode::LifetimeProjection(rp) = p
+                && rp.is_future()
+                && (1..=ctxt.body().arg_count).contains(&place.local().as_usize())
+            {
+                return ShouldKillNode::No;
+            }
             if ctxt.bc().is_dead(p.into(), location) {
                 return ShouldKillNode::Yes {
                     reason: "Borrow-checker reports node as dead".into(),
