@@ -469,6 +469,19 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
                     )
                     .into(),
                 )?;
+                // `p` holds no value anymore, so its lifetime projections are
+                // earlier versions: they stood for its value before this point.
+                let label = self.prev_snapshot_location();
+                for rp in p.lifetime_projections(self.ctxt) {
+                    self.record_and_apply_action(
+                        BorrowPcgAction::label_lifetime_projection(
+                            LabelNodePredicate::postfix_lifetime_projection(rp.into()),
+                            Some(label.into()),
+                            "Label the lifetime projections of a weakened place",
+                        )
+                        .into(),
+                    )?;
+                }
             }
         }
         Ok(())
