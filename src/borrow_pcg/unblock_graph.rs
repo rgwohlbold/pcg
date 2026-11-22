@@ -114,11 +114,12 @@ impl<'tcx> UnblockGraph<'tcx> {
         Ok(actions)
     }
 
-    /// For the removal of an expansion of a lifetime projection into the
-    /// lifetime projections of all parts of its place, the aggregate edge
-    /// from those into the expanded one. An expansion into some of the parts
-    /// (e.g. an element of an array) is left out: the rest of the place is
-    /// in none of them.
+    /// For the removal of an expansion of an earlier version of a lifetime
+    /// projection into the lifetime projections of all parts of its place,
+    /// the aggregate edge from those into the expanded one. Removing the
+    /// expansion of the latest version puts it back together already. An
+    /// expansion into some of the parts (e.g. an element of an array) is left
+    /// out: the rest of the place is in none of them.
     fn reassembly(edge: &UnblockEdge<'tcx>) -> Option<UnblockEdge<'tcx>> {
         let BorrowPcgEdgeKind::BorrowPcgExpansion(BorrowPcgExpansion::LifetimeProjection(
             expansion,
@@ -126,6 +127,7 @@ impl<'tcx> UnblockGraph<'tcx> {
         else {
             return None;
         };
+        expansion.base.label()?;
         if expansion.guide.is_some_and(|guide| guide.is_partial()) {
             return None;
         }
