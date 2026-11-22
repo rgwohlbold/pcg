@@ -3,9 +3,21 @@ use std::marker::PhantomData;
 
 use crate::{
     borrow_pcg::{
+        borrow_pcg_expansion::internal::BorrowPcgExpansionData,
+        region_projection::{LocalLifetimeProjection, PlaceOrConst},
+    },
+    utils::place::maybe_remote::MaybeRemotePlace,
+};
+
+use crate::{
+    borrow_pcg::{
         borrow_pcg_edge::{BorrowPcgEdge, BorrowPcgEdgeRef},
         borrow_pcg_expansion::BorrowPcgExpansion,
-        edge::{aggregate::AggregateEdge, kind::BorrowPcgEdgeKind},
+        edge::{
+            aggregate::AggregateEdge,
+            borrow_flow::{BorrowFlowEdge, BorrowFlowEdgeKind, private::FutureEdgeKind},
+            kind::BorrowPcgEdgeKind,
+        },
     },
     error::PcgInternalError,
     utils::{HasBorrowCheckerCtxt, data_structures::HashSet},
@@ -62,8 +74,10 @@ impl<'tcx> UnblockGraph<'tcx> {
         'tcx: 'a,
         UnblockEdge<'tcx>: EdgeData<'tcx, Ctxt>,
     {
+        let all_edges = self.edges.clone();
         let mut edges = self.edges;
         let mut actions = vec![];
+        let mut expanded_again = HashSet::default();
 
         while !edges.is_empty() {
             let mut to_keep = edges.clone();
@@ -77,6 +91,14 @@ impl<'tcx> UnblockGraph<'tcx> {
                     actions.push(BorrowPcgUnblockAction::new(edge.clone()));
                     actions.extend(
                         Self::reassembly(edge)
+                            .into_iter()
+                            .chain(Self::reexpansion(edge, &edges, &mut expanded_again))
+                            .chain(Self::lender_again(edge))
+                            .chain(
+                                Self::earlier_version(edge, &all_edges)
+                                    .into_iter()
+                                    .flatten(),
+                            )
                             .map(|edge| BorrowPcgUnblockAction::AddEdge(edge, PhantomData)),
                     );
                     to_keep.remove(edge);
@@ -114,6 +136,126 @@ impl<'tcx> UnblockGraph<'tcx> {
             .collect();
         Some(BorrowPcgEdge::new(
             AggregateEdge::new(sources, expansion.base).into(),
+            edge.conditions().clone(),
+        ))
+    }
+}
+
+impl<'tcx> UnblockGraph<'tcx> {
+    /// For the removal of an edge from the referent of a reborrowed place into
+    /// the reborrow of the same lifetime, e.g. `(*x)|'a -> y|'a` for
+    /// `y = &mut *x`, the edge from the reborrow into the referent that stands
+    /// for the referent getting back what the reborrow holds, as a borrow's
+    /// future edge does once the lender becomes current.
+    fn lender_again(edge: &UnblockEdge<'tcx>) -> Option<UnblockEdge<'tcx>> {
+        let BorrowPcgEdgeKind::BorrowFlow(flow) = edge.kind() else {
+            return None;
+        };
+        if !matches!(
+            flow.kind(),
+            BorrowFlowEdgeKind::BorrowOutlives {
+                regions_equal: true
+            }
+        ) {
+            return None;
+        }
+        let PlaceOrConst::Place(MaybeRemotePlace::Local(lender)) = flow.long().base() else {
+            return None;
+        };
+        Some(BorrowPcgEdge::new(
+            BorrowFlowEdge::new(
+                flow.short().into(),
+                flow.long().with_base(lender),
+                BorrowFlowEdgeKind::Future(FutureEdgeKind::FromBorrow),
+            )
+            .into(),
+            edge.conditions().clone(),
+        ))
+    }
+
+    /// For the removal of an edge from an earlier version of a lifetime
+    /// projection into a later one, which holds the same contents once it has
+    /// become current, the edges that give them to the earlier version again:
+    /// the expansion of the later version into the parts of its expansion in
+    /// `edges`, and the aggregate edge from those parts into the earlier one.
+    fn earlier_version(
+        edge: &UnblockEdge<'tcx>,
+        edges: &HashSet<UnblockEdge<'tcx>>,
+    ) -> Option<[UnblockEdge<'tcx>; 2]> {
+        let BorrowPcgEdgeKind::BorrowFlow(flow) = edge.kind() else {
+            return None;
+        };
+        if !flow.kind().is_future_to_self() || flow.short().is_future() {
+            return None;
+        }
+        let PlaceOrConst::Place(MaybeRemotePlace::Local(earlier)) = flow.long().base() else {
+            return None;
+        };
+        let earlier = flow.long().with_base(earlier);
+        let later = flow.short();
+        let parts = edges.iter().find_map(|edge| match edge.kind() {
+            BorrowPcgEdgeKind::BorrowPcgExpansion(BorrowPcgExpansion::LifetimeProjection(
+                expansion,
+            )) if expansion.base == later
+                && !expansion.guide.is_some_and(|guide| guide.is_partial()) =>
+            {
+                Some(expansion.expansion.clone())
+            }
+            _ => None,
+        })?;
+        let expansion = BorrowPcgExpansion::LifetimeProjection(BorrowPcgExpansionData {
+            base: later,
+            expansion: parts.clone(),
+            guide: None,
+        });
+        let sources = parts.iter().map(|node| ((*node).into(), None)).collect();
+        Some([
+            BorrowPcgEdge::new(expansion.into(), edge.conditions().clone()),
+            BorrowPcgEdge::new(
+                AggregateEdge::new(sources, earlier).into(),
+                edge.conditions().clone(),
+            ),
+        ])
+    }
+
+    /// For the removal of an edge from a part of a place's lifetime projection
+    /// into the projection once it has become current, which stands for the
+    /// projection being put back together from its parts, the expansion of
+    /// the projection into the parts of all such edges in `edges`. It is added
+    /// once per projection, recorded in `expanded_again`.
+    fn reexpansion(
+        edge: &UnblockEdge<'tcx>,
+        edges: &HashSet<UnblockEdge<'tcx>>,
+        expanded_again: &mut HashSet<LocalLifetimeProjection<'tcx>>,
+    ) -> Option<UnblockEdge<'tcx>> {
+        let from_part = |edge: &UnblockEdge<'tcx>| match edge.kind() {
+            BorrowPcgEdgeKind::BorrowFlow(flow)
+                if flow.kind().is_future_from_expansion() && !flow.short().is_future() =>
+            {
+                let PlaceOrConst::Place(MaybeRemotePlace::Local(part)) = flow.long().base() else {
+                    return None;
+                };
+                Some((flow.short(), flow.long().with_base(part)))
+            }
+            _ => None,
+        };
+        let (projection, _) = from_part(edge)?;
+        if !expanded_again.insert(projection) {
+            return None;
+        }
+        let parts = edges
+            .iter()
+            .filter_map(from_part)
+            .filter(|(target, _)| *target == projection)
+            .map(|(_, part)| part)
+            .collect();
+        Some(BorrowPcgEdge::new(
+            BorrowPcgExpansion::LifetimeProjection(BorrowPcgExpansionData {
+                base: projection,
+                expansion: parts,
+                guide: None,
+            })
+            .into(),
             edge.conditions().clone(),
         ))
     }
