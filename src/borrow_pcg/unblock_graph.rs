@@ -1,10 +1,12 @@
 //! Data structures and algorithms related to [`UnblockGraph`].
 use std::marker::PhantomData;
 
-use derive_more::From;
-
 use crate::{
-    borrow_pcg::borrow_pcg_edge::{BorrowPcgEdge, BorrowPcgEdgeRef},
+    borrow_pcg::{
+        borrow_pcg_edge::{BorrowPcgEdge, BorrowPcgEdgeRef},
+        borrow_pcg_expansion::BorrowPcgExpansion,
+        edge::{aggregate::AggregateEdge, kind::BorrowPcgEdgeKind},
+    },
     error::PcgInternalError,
     utils::{HasBorrowCheckerCtxt, data_structures::HashSet},
 };
@@ -25,35 +27,40 @@ pub struct UnblockGraph<'tcx, Edge = UnblockEdge<'tcx>> {
     _marker: PhantomData<&'tcx ()>,
 }
 
-/// An action that removes an edge from the Borrow PCG
-#[derive(Clone, Debug, Eq, PartialEq, From)]
-pub struct BorrowPcgUnblockAction<'tcx, Edge = BorrowPcgEdge<'tcx>> {
-    pub(super) edge: Edge,
-    _marker: PhantomData<&'tcx ()>,
+/// An action of unblocking nodes in the Borrow PCG.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BorrowPcgUnblockAction<'tcx, Edge = BorrowPcgEdge<'tcx>> {
+    /// Removes the edge.
+    RemoveEdge(Edge),
+    /// Adds the edge: the aggregate edge that puts a lifetime projection back
+    /// together from the nodes of its expansion once the expansion is
+    /// removed, as collapsing an owned place does.
+    AddEdge(Edge, PhantomData<&'tcx ()>),
 }
 
 impl<Edge> BorrowPcgUnblockAction<'_, Edge> {
     pub fn new(edge: Edge) -> Self {
-        Self {
-            edge,
-            _marker: PhantomData,
-        }
+        Self::RemoveEdge(edge)
     }
+
+    /// The edge the action removes or adds.
     pub fn edge(&self) -> &Edge {
-        &self.edge
+        match self {
+            Self::RemoveEdge(edge) | Self::AddEdge(edge, _) => edge,
+        }
     }
 }
 
-impl<'tcx, Edge: std::fmt::Debug + Clone + Eq + std::hash::Hash> UnblockGraph<'tcx, Edge> {
+impl<'tcx> UnblockGraph<'tcx> {
     /// Returns an ordered list of actions to unblock the edges in the graph.
     /// This is essentially a topological sort of the edges.
     pub fn actions<'a, Ctxt: HasBorrowCheckerCtxt<'a, 'tcx>>(
         self,
         ctxt: Ctxt,
-    ) -> Result<Vec<BorrowPcgUnblockAction<'tcx, Edge>>, PcgInternalError>
+    ) -> Result<Vec<BorrowPcgUnblockAction<'tcx>>, PcgInternalError>
     where
         'tcx: 'a,
-        Edge: EdgeData<'tcx, Ctxt>,
+        UnblockEdge<'tcx>: EdgeData<'tcx, Ctxt>,
     {
         let mut edges = self.edges;
         let mut actions = vec![];
@@ -61,13 +68,17 @@ impl<'tcx, Edge: std::fmt::Debug + Clone + Eq + std::hash::Hash> UnblockGraph<'t
         while !edges.is_empty() {
             let mut to_keep = edges.clone();
 
-            let should_kill_edge = |edge: &Edge| {
+            let should_kill_edge = |edge: &UnblockEdge<'tcx>| {
                 edge.blocked_by_nodes(ctxt)
                     .all(|node| edges.iter().all(|e| !e.blocks_node(node.into(), ctxt)))
             };
             for edge in &edges {
                 if should_kill_edge(edge) {
                     actions.push(BorrowPcgUnblockAction::new(edge.clone()));
+                    actions.extend(
+                        Self::reassembly(edge)
+                            .map(|edge| BorrowPcgUnblockAction::AddEdge(edge, PhantomData)),
+                    );
                     to_keep.remove(edge);
                 }
             }
@@ -79,6 +90,32 @@ impl<'tcx, Edge: std::fmt::Debug + Clone + Eq + std::hash::Hash> UnblockGraph<'t
             edges = to_keep;
         }
         Ok(actions)
+    }
+
+    /// For the removal of an expansion of a lifetime projection into the
+    /// lifetime projections of all parts of its place, the aggregate edge
+    /// from those into the expanded one. An expansion into some of the parts
+    /// (e.g. an element of an array) is left out: the rest of the place is
+    /// in none of them.
+    fn reassembly(edge: &UnblockEdge<'tcx>) -> Option<UnblockEdge<'tcx>> {
+        let BorrowPcgEdgeKind::BorrowPcgExpansion(BorrowPcgExpansion::LifetimeProjection(
+            expansion,
+        )) = edge.kind()
+        else {
+            return None;
+        };
+        if expansion.guide.is_some_and(|guide| guide.is_partial()) {
+            return None;
+        }
+        let sources = expansion
+            .expansion
+            .iter()
+            .map(|node| ((*node).into(), None))
+            .collect();
+        Some(BorrowPcgEdge::new(
+            AggregateEdge::new(sources, expansion.base).into(),
+            edge.conditions().clone(),
+        ))
     }
 }
 
