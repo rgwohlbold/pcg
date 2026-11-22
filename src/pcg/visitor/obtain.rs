@@ -702,6 +702,18 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
                 _ => unreachable!(),
             },
         };
+        // An edge action that changed nothing, e.g. the addition of an edge
+        // that is already in the graph, is not recorded: the consumers of the
+        // actions take each addition or removal of an edge as a change.
+        if let PcgAction::Borrow(borrow_action) = &action
+            && matches!(
+                borrow_action.kind,
+                BorrowPcgActionKind::AddEdge { .. } | BorrowPcgActionKind::RemoveEdge(_)
+            )
+            && !result.changed
+        {
+            return Ok(());
+        }
         #[cfg(feature = "visualization")]
         let location = self.location();
         #[cfg(feature = "visualization")]
