@@ -49,6 +49,17 @@ impl BorrowFlowEdgeKind<'_> {
         )
     }
 
+    /// Whether the edge is of the form `y|'a -> x|'a at FUTURE` for a borrow
+    /// `y = &mut x`: once the future node becomes current, it holds what the
+    /// borrower holds at that point.
+    #[must_use]
+    pub fn is_future_from_borrow(&self) -> bool {
+        matches!(
+            self,
+            BorrowFlowEdgeKind::Future(private::FutureEdgeKind::FromBorrow)
+        )
+    }
+
     /// Whether the edge is of the form `x|'a at loc -> x|'a at FUTURE`: once
     /// the future node becomes current, it is the labelled node again.
     #[must_use]

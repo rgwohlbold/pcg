@@ -7,10 +7,7 @@ use crate::{
     RestoreCapability, Weaken,
     action::BorrowPcgAction,
     borrow_pcg::{
-        edge::{
-            borrow_flow::private::FutureEdgeKind,
-            kind::{BorrowPcgEdgeKind, BorrowPcgEdgeType},
-        },
+        edge::kind::{BorrowPcgEdgeKind, BorrowPcgEdgeType},
         edge_data::{LabelEdgePlaces, LabelNodePredicate, NodeReplacement},
         has_pcs_elem::PlaceLabeller,
         region_projection::{LifetimeProjection, LifetimeProjectionLabel},
@@ -213,9 +210,7 @@ impl LabelPlaceReason {
                 LabelNodePredicate::not(LabelNodePredicate::And(vec![
                     LabelNodePredicate::PlaceEquals(place),
                     LabelNodePredicate::InSourceNodes,
-                    LabelNodePredicate::EdgeType(BorrowPcgEdgeType::BorrowFlow {
-                        future_edge_kind: Some(FutureEdgeKind::FromExpansion),
-                    }),
+                    LabelNodePredicate::from_expansion_or_borrow_edge(),
                 ])),
             ]),
             LabelPlaceReason::Collapse => LabelNodePredicate::PlaceEquals(place),

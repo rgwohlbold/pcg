@@ -550,6 +550,7 @@ pub(crate) trait PlaceExpander<'a, 'tcx: 'a>:
             self.add_and_update_placeholder_edges(
                 old_rp_base.into(),
                 expansion_rps,
+                FutureEdgeKind::FromExpansion,
                 "obtain",
                 ctxt,
             )?;
@@ -572,7 +573,8 @@ pub(crate) trait PlaceExpander<'a, 'tcx: 'a>:
     /// Adds a node `future_rp` which is the future node for `origin_rp`.
     ///
     /// 1. Add a Future edge from `origin_rp` to `future_rp`
-    /// 2. Add Future edges from each `expansion_rp` to `future_rp`
+    /// 2. Add Future edges of kind `kind` from each `expansion_rp` to
+    ///    `future_rp`
     /// 3. All Future edges with source `origin_rp` (except for the one
     ///    created in step 1) are modified to now have source `future_rp`
     ///
@@ -580,6 +582,7 @@ pub(crate) trait PlaceExpander<'a, 'tcx: 'a>:
         &mut self,
         origin_rp: LocalLifetimeProjection<'tcx>,
         expansion_rps: &[LifetimeProjection<'tcx>],
+        kind: FutureEdgeKind,
         context: &str,
         ctxt: impl HasBorrowCheckerCtxt<'a, 'tcx>,
     ) -> Result<(), PcgError> {
@@ -613,7 +616,7 @@ pub(crate) trait PlaceExpander<'a, 'tcx: 'a>:
                         BorrowFlowEdge::new(
                             *expansion_rp,
                             future_rp,
-                            BorrowFlowEdgeKind::Future(FutureEdgeKind::FromExpansion),
+                            BorrowFlowEdgeKind::Future(kind),
                         )
                         .into(),
                         self.path_conditions(),

@@ -1,7 +1,10 @@
 use crate::{
     borrow_pcg::{
         borrow_pcg_edge::BorrowPcgEdgeRef,
-        edge::kind::{BorrowPcgEdgeKind, BorrowPcgEdgeType},
+        edge::{
+            borrow_flow::private::FutureEdgeKind,
+            kind::{BorrowPcgEdgeKind, BorrowPcgEdgeType},
+        },
         graph::Conditioned,
         has_pcs_elem::{LabelNodeContext, LabelPlace, PlaceLabeller, SourceOrTarget},
         region_projection::{
@@ -209,6 +212,21 @@ impl<P: Copy> LabelNodePredicate<'_, P> {
 
     pub(crate) fn not(self) -> Self {
         Self::Not(Box::new(self))
+    }
+
+    /// Matches future edges from the targets of an expansion or a borrow into
+    /// a future node.
+    pub(crate) fn from_expansion_or_borrow_edge() -> Self {
+        Self::Or(
+            [FutureEdgeKind::FromExpansion, FutureEdgeKind::FromBorrow]
+                .into_iter()
+                .map(|kind| {
+                    Self::EdgeType(BorrowPcgEdgeType::BorrowFlow {
+                        future_edge_kind: Some(kind),
+                    })
+                })
+                .collect(),
+        )
     }
 }
 
