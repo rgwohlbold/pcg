@@ -476,6 +476,14 @@ impl<'pcg, 'a: 'pcg, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx> + DebugCtxt>
                             .into(),
                 };
             }
+            // While the place is blocked, e.g. borrowed, its future node stays:
+            // unblocking the place makes it current.
+            if let PcgNode::LifetimeProjection(rp) = p
+                && rp.is_future()
+                && fg.has_edge_blocking(place.into(), ctxt)
+            {
+                return ShouldKillNode::No;
+            }
             if ctxt.bc().is_dead(p.into(), location) {
                 return ShouldKillNode::Yes {
                     reason: "Borrow-checker reports node as dead".into(),
