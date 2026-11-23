@@ -8,7 +8,7 @@ use crate::{
         borrow_pcg_expansion::BorrowPcgExpansion,
         edge::{deref::DerefEdge, kind::BorrowPcgEdgeKind},
         edge_data::EdgeData,
-        graph::{Conditioned, frozen::FrozenGraphRef},
+        graph::{Conditioned, frozen::FrozenGraphRef, loop_abstraction::MaybeRemoteCurrentPlace},
     },
     owned_pcg::RepackGuide,
     pcg::{
@@ -370,12 +370,71 @@ impl<'pcg, 'a: 'pcg, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx> + DebugCtxt>
             true
         };
 
+        // The lifetime projections that hold what the caller is still owed,
+        // which are kept until the return, where consumers give it back by
+        // unblocking the caller's remote nodes: those a remote node depends
+        // on and from which a future node whose place has ended (is old or
+        // dead) is reachable. The body no longer makes such a future node
+        // current, so killing them would lose what flows into it. A future
+        // node of a live place becomes current when the place is restored,
+        // which the nodes blocking it must not prevent.
+        let owed = {
+            let fg = self.pcg.borrow.graph.frozen_graph();
+            let reach = |start: PcgNode<'tcx>| {
+                let mut reached: HashSet<PcgNode<'tcx>> = HashSet::default();
+                let mut todo = vec![start];
+                while let Some(node) = todo.pop() {
+                    for edge in fg.get_edges_blocking(node, ctxt.bc_ctxt()) {
+                        for blocking in edge.blocked_by_nodes(ctxt) {
+                            let blocking: PcgNode<'tcx> = blocking.into();
+                            if reached.insert(blocking) {
+                                todo.push(blocking);
+                            }
+                        }
+                    }
+                }
+                reached
+            };
+            let mut depended_on: HashSet<PcgNode<'tcx>> = HashSet::default();
+            for node in fg.nodes(ctxt).iter() {
+                if node.try_into_lifetime_projection().is_ok_and(|rp| {
+                    rp.base()
+                        .maybe_remote_current_place()
+                        .is_some_and(MaybeRemoteCurrentPlace::is_remote)
+                }) {
+                    depended_on.extend(reach(*node));
+                }
+            }
+            let pending = depended_on
+                .iter()
+                .copied()
+                .filter(|node| match node.as_local_node() {
+                    Some(local @ PcgNode::LifetimeProjection(rp)) => {
+                        rp.is_future()
+                            && (rp.base().is_old() || ctxt.bc().is_dead(local.into(), location))
+                    }
+                    _ => false,
+                })
+                .collect::<HashSet<_>>();
+            depended_on
+                .iter()
+                .copied()
+                .filter(|node| {
+                    matches!(node, PcgNode::LifetimeProjection(_))
+                        && (pending.contains(node)
+                            || reach(*node).iter().any(|n| pending.contains(n)))
+                })
+                .collect::<HashSet<_>>()
+        };
+
         let should_kill_node = |p: LocalNode<'tcx>, fg: &FrozenGraphRef<'slf, 'tcx>| {
             let place = match p {
                 PcgNode::Place(p) => p,
                 PcgNode::LifetimeProjection(rp) => rp.base(),
             };
-            if !ancestor_predicate_allows_killing(p) {
+            if !ancestor_predicate_allows_killing(p)
+                || (matches!(p, PcgNode::LifetimeProjection(_)) && owed.contains(&PcgNode::from(p)))
+            {
                 return ShouldKillNode::No;
             }
 
@@ -416,16 +475,6 @@ impl<'pcg, 'a: 'pcg, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx> + DebugCtxt>
                         "Node is a place with a non-empty projection and is not blocked by an edge"
                             .into(),
                 };
-            }
-            // The future node of an argument's place stands for what the place
-            // gets back when a borrow of it ends, which goes back to the caller
-            // at the return: it is kept although the body does not use the
-            // place anymore.
-            if let PcgNode::LifetimeProjection(rp) = p
-                && rp.is_future()
-                && (1..=ctxt.body().arg_count).contains(&place.local().as_usize())
-            {
-                return ShouldKillNode::No;
             }
             if ctxt.bc().is_dead(p.into(), location) {
                 return ShouldKillNode::Yes {
@@ -474,6 +523,8 @@ impl<'pcg, 'a: 'pcg, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx> + DebugCtxt>
         let should_pack_edge = |edge: &BorrowPcgEdgeKind<'tcx>| {
             if let BorrowPcgEdgeKind::BorrowPcgExpansion(expansion) = edge {
                 if !ancestor_predicate_allows_killing(expansion.base())
+                    || (matches!(expansion.base(), PcgNode::LifetimeProjection(_))
+                        && owed.contains(&PcgNode::from(expansion.base())))
                     || is_joined_at_collapse(expansion)
                 {
                     return ShouldPackEdge::No;
