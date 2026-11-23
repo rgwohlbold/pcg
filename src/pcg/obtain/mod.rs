@@ -318,14 +318,43 @@ pub(crate) trait PlaceCollapser<'a, 'tcx: 'a>:
                                 .collect::<Vec<_>>()
                         })
                         .collect();
-                    // A projection that is still the unlabelled base of its
+                    let rp: LocalLifetimeProjection<'tcx> = rp.into();
+                    // An expansion that labelled `rp` added its future node,
+                    // which the parts and, after a partial write, the labelled
+                    // `rp` holding the rest flow into: the collapse makes it
+                    // the current version. The parts' places end here, so
+                    // their nodes are labelled first, as for an aggregate.
+                    let future: LocalLifetimeProjection<'tcx> = rp.with_placeholder_label(ctxt);
+                    if self.borrows_state().graph.contains(future, ctxt.bc_ctxt()) {
+                        for node in &rp_expansion {
+                            if let Some(place) = node.base.as_current_place() {
+                                let labeller = SetLabel(self.prev_snapshot_location());
+                                self.borrows_state().graph.label_place(
+                                    (*place).into(),
+                                    LabelPlaceReason::Collapse,
+                                    &labeller,
+                                    ctxt,
+                                );
+                            }
+                        }
+                        self.apply_action(
+                            BorrowPcgAction::label_lifetime_projection(
+                                LabelNodePredicate::equals_lifetime_projection(future),
+                                None,
+                                "collapse: the future node becomes current",
+                            )
+                            .into(),
+                        )?;
+                        continue;
+                    }
+                    // Otherwise `rp` was not labelled by the expansion. A
+                    // projection that is still the unlabelled base of its
                     // expansion, and whose parts get nothing but what the
                     // expansion gives them, was not changed through the
                     // expansion, so the parts need not be aggregated into it.
                     // If a part was changed on another path to here, the
                     // projection's unchanged version is snapshotted, and the
                     // parts make up the current one.
-                    let rp: LocalLifetimeProjection<'tcx> = rp.into();
                     let graph = &self.borrows_state().graph;
                     let is_expansion_of_rp = |kind: &BorrowPcgEdgeKind<'tcx>| {
                         matches!(

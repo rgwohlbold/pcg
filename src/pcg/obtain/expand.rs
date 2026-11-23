@@ -168,7 +168,6 @@ pub(crate) trait PlaceExpander<'a, 'tcx: 'a>:
         }
         for (rp, parts) in to_snapshot {
             self.snapshot_expanded_lifetime_projection(
-                base,
                 rp,
                 self.prev_snapshot_location(),
                 &parts,
@@ -504,7 +503,7 @@ pub(crate) trait PlaceExpander<'a, 'tcx: 'a>:
                                 .expect_lifetime_projection()
                         })
                         .collect::<Vec<_>>();
-                    self.connect_snapshot_to_parts(base, base_rp, label, &expansion_rps, ctxt)?;
+                    self.connect_snapshot_to_parts(base_rp, label, &expansion_rps, ctxt)?;
                 }
             }
         }
@@ -512,11 +511,10 @@ pub(crate) trait PlaceExpander<'a, 'tcx: 'a>:
     }
 
     /// Labels `base_rp`, which is expanded into `expansion_rps`, as a snapshot
-    /// at `label`, and, for a borrowed place or a mutable reference, connects
-    /// the snapshot to the parts through placeholder edges.
+    /// at `label`, and connects the snapshot to the parts through placeholder
+    /// edges.
     fn snapshot_expanded_lifetime_projection(
         &mut self,
-        base: Place<'tcx>,
         base_rp: LifetimeProjection<'tcx, Place<'tcx>>,
         label: SnapshotLocation,
         expansion_rps: &[LifetimeProjection<'tcx>],
@@ -530,32 +528,28 @@ pub(crate) trait PlaceExpander<'a, 'tcx: 'a>:
             )
             .into(),
         )?;
-        self.connect_snapshot_to_parts(base, base_rp, label, expansion_rps, ctxt)
+        self.connect_snapshot_to_parts(base_rp, label, expansion_rps, ctxt)
     }
 
-    /// For a borrowed place or a mutable reference `base`, connects the
-    /// snapshot of `base_rp` at `label` to the parts `expansion_rps` through
-    /// placeholder edges.
+    /// Connects the snapshot of `base_rp` at `label` to the parts
+    /// `expansion_rps` through placeholder edges: the future node of the base
+    /// is what the parts give back when the expansion ends, for owned places
+    /// as for borrowed ones, whether the parts are collapsed or die.
     fn connect_snapshot_to_parts(
         &mut self,
-        base: Place<'tcx>,
         base_rp: LifetimeProjection<'tcx, Place<'tcx>>,
         label: SnapshotLocation,
         expansion_rps: &[LifetimeProjection<'tcx>],
         ctxt: impl HasBorrowCheckerCtxt<'a, 'tcx>,
     ) -> Result<(), PcgError> {
-        // Don't add placeholder edges for owned expansions, unless it's a deref
-        if base.as_borrowed_place(ctxt).is_some() || base.is_mut_ref(ctxt) {
-            let old_rp_base = base_rp.with_label(Some(label.into()), ctxt);
-            self.add_and_update_placeholder_edges(
-                old_rp_base.into(),
-                expansion_rps,
-                FutureEdgeKind::FromExpansion,
-                "obtain",
-                ctxt,
-            )?;
-        }
-        Ok(())
+        let old_rp_base = base_rp.with_label(Some(label.into()), ctxt);
+        self.add_and_update_placeholder_edges(
+            old_rp_base.into(),
+            expansion_rps,
+            FutureEdgeKind::FromExpansion,
+            "obtain",
+            ctxt,
+        )
     }
 
     /// Performs bookkeeping for future nodes in the case where capability from
@@ -563,8 +557,8 @@ pub(crate) trait PlaceExpander<'a, 'tcx: 'a>:
     /// (unlabelled) `expansion_rps`, but will eventually be transferred back to
     /// `origin_rp`.
     ///
-    /// This happens in the case of borrows and expansions of borrowed places,
-    /// in which case `origin_rp` is labelled.
+    /// This happens in the case of borrows and expansions of places, in which
+    /// case `origin_rp` is labelled.
     /// We also use this for constructing loop abstractions where `origin_rp`
     /// is unlabelled (the labels are added in a later stage).
     ///
