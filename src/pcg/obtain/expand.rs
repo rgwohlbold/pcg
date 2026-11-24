@@ -72,7 +72,9 @@ pub(crate) trait PlaceExpander<'a, 'tcx: 'a>:
     ) -> Result<(), PcgError> {
         // Obtains at a loop head stand for the whole loop body, which may also
         // change projections through borrows held in other locals.
-        let changed = if matches!(obtain_type, ObtainType::LoopInvariant { .. }) {
+        let changed = if ctxt.settings().label_all_lifetime_projections
+            || matches!(obtain_type, ObtainType::LoopInvariant { .. })
+        {
             None
         } else {
             lifetimes_changed_through(place, ctxt)

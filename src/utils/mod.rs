@@ -126,6 +126,9 @@ pub struct PcgSettings {
     pub skip_function: Option<String>,
     pub coupling: bool,
     pub pack_strategy: PackStrategy,
+    /// Whether an expansion labels every lifetime projection of its base, not
+    /// only those that the obtain may change (see `lifetimes_changed_through`).
+    pub label_all_lifetime_projections: bool,
 }
 
 impl Default for PcgSettings {
@@ -192,6 +195,11 @@ impl PcgSettings {
         let skip_function = Self::process_string_var(&mut processed_vars, "PCG_SKIP_FUNCTION");
         let coupling = Self::process_bool_var(&mut processed_vars, "PCG_COUPLING", true);
         let pack_strategy = Self::process_pack_strategy(&mut processed_vars);
+        let label_all_lifetime_projections = Self::process_bool_var(
+            &mut processed_vars,
+            "PCG_LABEL_ALL_LIFETIME_PROJECTIONS",
+            false,
+        );
 
         // Check for unknown PCG_ environment variables
         Self::check_for_unknown_vars(&processed_vars);
@@ -213,6 +221,7 @@ impl PcgSettings {
             skip_function,
             coupling,
             pack_strategy,
+            label_all_lifetime_projections,
         }
     }
 
