@@ -523,6 +523,9 @@ impl<'tcx> FunctionData<'tcx> {
     /// The lifetime of `node` in [`Self::shape`], whose nodes index the
     /// lifetimes of their argument or result in the order of the shape, which
     /// lists the lifetimes in a type parameter's trait bounds as well.
+    // TODO: give the lifetimes in a type parameter's trait bounds nodes in
+    // bodies too, numbered as in shapes. Clients could then use a shape node's
+    // index as a body's, and would not need this function to translate it.
     pub fn shape_node_lifetime<Ctxt: HasTyCtxt<'tcx> + Copy>(
         self,
         node: FunctionShapeNode<Generalized>,
