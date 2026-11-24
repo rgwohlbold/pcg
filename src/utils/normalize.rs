@@ -147,3 +147,28 @@ pub(crate) fn deeply_normalize<'tcx, T: TypeFoldable<ty::TyCtxt<'tcx>>>(
         .at(&cause, param_env)
         .deeply_normalize(value, &mut *fulfill_cx)
 }
+
+/// `value` with its opaque types replaced by their hidden types, keeping its
+/// regions, as normalizing after analysis does. This is all that the types of
+/// a MIR body need: rustc has already normalized their associated types.
+pub fn normalize_opaque_types<'tcx, T: TypeFoldable<ty::TyCtxt<'tcx>>>(
+    tcx: ty::TyCtxt<'tcx>,
+    value: T,
+) -> T {
+    value.fold_with(&mut ty::BottomUpFolder {
+        tcx,
+        ty_op: |t: ty::Ty<'tcx>| match *t.kind() {
+            ty::Alias(
+                _,
+                ty::AliasTy {
+                    kind: ty::Opaque { def_id },
+                    args,
+                    ..
+                },
+            ) => tcx.try_expand_impl_trait_type(def_id, args).unwrap_or(t),
+            _ => t,
+        },
+        lt_op: |r| r,
+        ct_op: |c| c,
+    })
+}

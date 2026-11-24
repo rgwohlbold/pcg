@@ -65,7 +65,7 @@ use rustc_interface::{
     dataflow::{AnalysisEngine, compute_fixpoint},
     middle::{
         mir::{self, Body},
-        ty::{self, TyCtxt},
+        ty::{self, TyCtxt, TypeVisitableExt},
     },
     mir_dataflow::move_paths::MoveData,
     span::def_id::LocalDefId,
@@ -365,8 +365,22 @@ impl<'tcx> PcgCtxtCreator<'tcx> {
         body: &'a impl BodyAndBorrows<'tcx>,
         bc: &'a impl BorrowCheckerInterface<'tcx>,
     ) -> &'a PcgCtxt<'a, 'tcx> {
+        // The types of the body's locals are normalized as the signatures of
+        // the function shapes are.
+        let mut mir = body.body();
+        if mir
+            .local_decls
+            .iter()
+            .any(|decl| decl.ty.has_opaque_types())
+        {
+            let mut revealed = mir.clone();
+            for decl in &mut revealed.local_decls {
+                decl.ty = utils::normalize::normalize_opaque_types(self.tcx, decl.ty);
+            }
+            mir = self.alloc(revealed);
+        }
         let pcg_ctxt: PcgCtxt<'a, 'tcx> =
-            PcgCtxt::with_settings(body.body(), self.tcx, bc, Cow::Borrowed(&self.settings));
+            PcgCtxt::with_settings(mir, self.tcx, bc, Cow::Borrowed(&self.settings));
         #[cfg(feature = "visualization")]
         if let Some(identifier) = pcg_ctxt.visualization_function_metadata() {
             self.debug_function_metadata
