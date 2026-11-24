@@ -520,6 +520,32 @@ impl<'tcx> FunctionData<'tcx> {
         ))
     }
 
+    /// The lifetime of `node` in [`Self::shape`], whose nodes index the
+    /// lifetimes of their argument or result in the order of the shape, which
+    /// lists the lifetimes in a type parameter's trait bounds as well.
+    pub fn shape_node_lifetime<Ctxt: HasTyCtxt<'tcx> + Copy>(
+        self,
+        node: FunctionShapeNode<Generalized>,
+        ctxt: Ctxt,
+    ) -> Result<Option<GeneralizedLifetime<'tcx>>, MakeFunctionShapeError>
+    where
+        PcgRegion<'tcx>: DisplayWithCtxt<Ctxt>,
+    {
+        let source = self.shape_data_source(ctxt.tcx())?;
+        Ok(match node.base() {
+            ArgIdxOrResult::Argument(arg) => source
+                .input_arg_projections(ctxt)
+                .into_iter()
+                .find(|p| p.base == arg && p.region_idx == node.region_idx())
+                .map(|p| p.region),
+            ArgIdxOrResult::Result => source
+                .result_projections(ctxt)
+                .into_iter()
+                .find(|p| p.region_idx == node.region_idx())
+                .map(|p| p.region),
+        })
+    }
+
     pub fn coupled_edges(
         self,
         tcx: ty::TyCtxt<'tcx>,
