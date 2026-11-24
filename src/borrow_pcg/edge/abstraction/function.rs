@@ -616,7 +616,12 @@ impl<'tcx> FunctionData<'tcx> {
         } else {
             skip_normalization(tcx.fn_sig(self.def_id).instantiate_identity())
         };
-        tcx.liberate_late_bound_regions(self.def_id, fn_sig)
+        let fn_sig = tcx.liberate_late_bound_regions(self.def_id, fn_sig);
+        // Normalized like the types of the function's body, e.g. an
+        // associated type of a known impl to the type the impl defines.
+        let typing_env = ty::TypingEnv::post_analysis(tcx, self.def_id);
+        let (infcx, param_env) = tcx.infer_ctxt().build_with_typing_env(typing_env);
+        deeply_normalize(&infcx, param_env, fn_sig).unwrap()
     }
 
     /// Returns the function signature instantiated with the given substs (but
