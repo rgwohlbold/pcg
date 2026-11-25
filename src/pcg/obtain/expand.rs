@@ -6,6 +6,7 @@ use crate::{
         borrow_pcg_edge::{BorrowPcgEdge, BorrowPcgEdgeLike},
         borrow_pcg_expansion::{BorrowPcgExpansion, PlaceExpansion},
         edge::{
+            aggregate::AggregateEdge,
             borrow_flow::{BorrowFlowEdge, BorrowFlowEdgeKind, private::FutureEdgeKind},
             deref::DerefEdge,
             kind::BorrowPcgEdgeKind,
@@ -623,6 +624,47 @@ pub(crate) trait PlaceExpander<'a, 'tcx: 'a>:
             )?;
         }
         self.redirect_source_of_future_edges(origin_rp, future_rp, ctxt)
+    }
+
+    /// Makes the aggregate edges into `old_target`, a projection that is
+    /// lent by a mutable borrow, lead into its future node `new_target`: the
+    /// borrower gives the parts' loans back to the projection's next version,
+    /// which gives them back to the parts when the aggregate is removed.
+    fn redirect_target_of_aggregate_edges(
+        &mut self,
+        old_target: LocalLifetimeProjection<'tcx>,
+        new_target: LocalLifetimeProjection<'tcx>,
+        ctxt: impl HasBorrowCheckerCtxt<'a, 'tcx>,
+    ) -> Result<(), PcgError> {
+        let to_replace = self
+            .borrows_graph()
+            .edges_blocked_by(old_target.into(), ctxt.bc_ctxt())
+            .filter_map(|edge| {
+                let BorrowPcgEdgeKind::Aggregate(aggregate) = edge.kind else {
+                    return None;
+                };
+                Some((
+                    edge.to_owned_edge(),
+                    BorrowPcgEdge::new(
+                        AggregateEdge::new(
+                            aggregate.sources_with_operand_indices().collect(),
+                            new_target,
+                        )
+                        .into(),
+                        edge.conditions.clone(),
+                    ),
+                ))
+            })
+            .collect::<Vec<_>>();
+        for (to_remove, to_insert) in to_replace {
+            self.apply_action(
+                BorrowPcgAction::remove_edge(to_remove, "aggregate bookkeeping").into(),
+            )?;
+            self.apply_action(
+                BorrowPcgAction::add_edge(to_insert, "aggregate bookkeeping").into(),
+            )?;
+        }
+        Ok(())
     }
 
     fn redirect_source_of_future_edges(

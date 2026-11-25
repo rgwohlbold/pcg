@@ -331,6 +331,14 @@ impl<'a, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>> PcgVisitor<'_, 'a, 'tcx, Ctxt> 
                 "assign",
                 ctxt,
             )?;
+            if !nested_ref_mut_targets.is_empty() {
+                let source_proj = source_proj.into();
+                self.place_obtainer().redirect_target_of_aggregate_edges(
+                    source_proj,
+                    source_proj.with_placeholder_label(ctxt),
+                    ctxt,
+                )?;
+            }
         }
         Ok(())
     }

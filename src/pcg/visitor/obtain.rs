@@ -489,8 +489,10 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
 
     /// Whether the graph still dereferences `place`, reaches it or a place
     /// it lies in by a dereference (whose removal packs `place` back into the
-    /// reference, e.g. `(*arg).b` into `arg`), or contains the borrow assigned
-    /// to it.
+    /// reference, e.g. `(*arg).b` into `arg`), contains the borrow assigned
+    /// to it, or joins parts into its current lifetime projection by an
+    /// aggregate edge, whose removal gives the parts their loans back from
+    /// the place's value.
     fn reference_in_use(&self, place: Place<'tcx>) -> bool {
         let current = MaybeLabelledPlace::Current(place);
         self.pcg
@@ -507,6 +509,9 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
                         )
                 }
                 BorrowPcgEdgeKind::Borrow(borrow) => borrow.assigned_ref == current,
+                BorrowPcgEdgeKind::Aggregate(aggregate) => {
+                    aggregate.target().base() == current && aggregate.target().label().is_none()
+                }
                 _ => false,
             })
     }
