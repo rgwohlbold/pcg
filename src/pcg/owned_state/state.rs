@@ -516,6 +516,10 @@ fn child<'a, 'tcx>(
             fields.get(idx).map(|(_, t)| t.as_ref())
         }
         (PlaceExpansion::Deref(d), PlaceElem::Deref) => Some(d.as_ref()),
+        (
+            PlaceExpansion::Guided(RepackGuide::Downcast(_, variant, t)),
+            PlaceElem::Downcast(_, elem_variant),
+        ) if variant == elem_variant => Some(t.as_ref()),
         _ => None,
     }
 }
@@ -529,6 +533,10 @@ fn child_mut<'a, 'tcx>(
             fields.get_mut(idx).map(|(_, t)| t.as_mut())
         }
         (PlaceExpansion::Deref(d), PlaceElem::Deref) => Some(d.as_mut()),
+        (
+            PlaceExpansion::Guided(RepackGuide::Downcast(_, variant, t)),
+            PlaceElem::Downcast(_, elem_variant),
+        ) if variant == elem_variant => Some(t.as_mut()),
         _ => None,
     }
 }
@@ -555,6 +563,10 @@ fn expand_leaf<'a, 'tcx: 'a, Ctxt: HasCompilerCtxt<'a, 'tcx>>(
             (!fields.is_empty()).then_some(PlaceExpansion::Fields(fields))
         }
         ProjectionElem::Deref => Some(PlaceExpansion::Deref(leaf())),
+        // An enum is expanded into the variant the place projects to.
+        ProjectionElem::Downcast(name, variant) => Some(PlaceExpansion::Guided(
+            RepackGuide::Downcast(name, variant, leaf()),
+        )),
         _ => None,
     }
 }
