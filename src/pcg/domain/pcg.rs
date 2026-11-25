@@ -429,6 +429,19 @@ impl<'a, 'tcx: 'a> Pcg<'a, 'tcx> {
                 .collect(),
         );
         if ctxt.is_loop_head(other_block) {
+            // A back edge removes the views that the iteration added and the
+            // loop head does not have, before replaying the head's expansions.
+            if ctxt.bc_ctxt().is_back_edge(self_block, other_block) {
+                for edge in slf.extra_lifetime_projection_views(target.borrow.graph(), ctxt) {
+                    actions.push(
+                        BorrowPcgAction::remove_edge(
+                            edge,
+                            "bridge: a view the loop head does not have",
+                        )
+                        .into(),
+                    );
+                }
+            }
             actions.extend(slf.bridge_loop_expansions(target, self_block, other_block, ctxt)?);
         } else {
             for kind in slf.missing_lifetime_projection_views(target.borrow.graph(), ctxt) {
@@ -442,6 +455,63 @@ impl<'a, 'tcx: 'a> Pcg<'a, 'tcx> {
             }
         }
         Ok(actions)
+    }
+
+    /// The views in `self` (see `missing_lifetime_projection_views`) that
+    /// `graph` lacks and `self` can remove: those whose parts are not
+    /// blocked, i.e. not lent, apart from by views removed before them. A
+    /// view through an enum's variant is a view into the variant whose part
+    /// is expanded by another view, so the views are removed innermost first.
+    pub(crate) fn extra_lifetime_projection_views(
+        &self,
+        graph: &BorrowsGraph<'tcx>,
+        ctxt: impl DataflowCtxt<'a, 'tcx>,
+    ) -> Vec<BorrowPcgEdge<'tcx>> {
+        let own = self.borrow.graph();
+        let current = |node: &LifetimeProjection<'tcx, MaybeLabelledPlace<'tcx>>| {
+            node.label().is_none() && node.base().as_current_place().is_some()
+        };
+        let mut candidates = own
+            .edges()
+            .filter(|edge| {
+                let BorrowPcgEdgeKind::BorrowPcgExpansion(BorrowPcgExpansion::LifetimeProjection(
+                    expansion,
+                )) = edge.kind()
+                else {
+                    return false;
+                };
+                let base = expansion.base();
+                current(&base)
+                    && base
+                        .base()
+                        .as_current_place()
+                        .is_some_and(|place| place.as_owned_place(ctxt).is_some())
+                    && expansion.expansion().iter().all(current)
+                    && !graph.edges().any(|other| other.kind() == edge.kind())
+            })
+            .collect::<Vec<_>>();
+        let mut removed: Vec<BorrowPcgEdgeKind<'tcx>> = Vec::new();
+        let mut result = Vec::new();
+        while let Some(index) = candidates.iter().position(|edge| {
+            let BorrowPcgEdgeKind::BorrowPcgExpansion(BorrowPcgExpansion::LifetimeProjection(
+                expansion,
+            )) = edge.kind()
+            else {
+                unreachable!("the candidates are views")
+            };
+            expansion.expansion().iter().all(|part| {
+                own.edges_blocking((*part).into(), ctxt)
+                    .all(|blocking| removed.contains(blocking.kind()))
+            })
+        }) {
+            let edge = candidates.remove(index);
+            removed.push(edge.kind().clone());
+            result.push(BorrowPcgEdge::new(
+                edge.kind().clone(),
+                edge.conditions.clone(),
+            ));
+        }
+        result
     }
 
     /// The expansions in `graph` of lifetime projections of owned places
