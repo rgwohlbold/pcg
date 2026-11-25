@@ -16,6 +16,7 @@ use crate::visualization::stmt_graphs;
 use crate::{
     AnalysisEngine,
     action::AppliedActions,
+    borrow_pcg::borrow_pcg_edge::BorrowPcgEdge,
     error::PcgError,
     r#loop::{LoopAnalysis, LoopId, LoopPlaceUsageAnalysis, PlaceUsages},
     pcg::{
@@ -389,6 +390,30 @@ impl<'a, 'tcx> PendingDataflowState<'a, 'tcx, AnalysisCtxt<'a, 'tcx>> {
                     SnapshotLocation::BeforeJoin(ctxt.block),
                     ctxt,
                 )?;
+            }
+
+            // A view of an owned place's lifetime projection that some
+            // predecessors have is added to the others, as `bridge` reports
+            // on their edges, so that the join has it on every path. Loop
+            // heads replay the expansions of their own state instead (see
+            // `bridge_loop_expansions`).
+            if !ctxt.body_analysis.is_loop_head(ctxt.block) {
+                let graphs = std::iter::once(&first)
+                    .chain(rest.iter())
+                    .map(|incoming| incoming.data.pcg.states.0.post_main.borrow.graph().clone())
+                    .collect::<Vec<_>>();
+                for incoming in std::iter::once(&mut first).chain(rest.iter_mut()) {
+                    let state = Rc::make_mut(&mut incoming.data.pcg.states.0.post_main);
+                    for graph in &graphs {
+                        for kind in state.missing_lifetime_projection_views(graph, ctxt) {
+                            let conditions = state.borrow.validity_conditions.clone();
+                            state
+                                .borrow
+                                .graph
+                                .insert(BorrowPcgEdge::new(kind, conditions), ctxt);
+                        }
+                    }
+                }
             }
         }
 

@@ -4,10 +4,12 @@ use crate::{
     DebugLines,
     action::{AppliedActions, BorrowPcgAction, OwnedPcgAction, PcgActions},
     borrow_pcg::{
+        borrow_pcg_edge::BorrowPcgEdge,
         borrow_pcg_expansion::BorrowPcgExpansion,
         edge::{borrow::BorrowEdge, kind::BorrowPcgEdgeKind},
         edge_data::LabelNodePredicate,
         graph::{BorrowsGraph, join::JoinBorrowsArgs},
+        region_projection::LifetimeProjection,
         state::{BorrowStateMutRef, BorrowStateRef, BorrowsState, BorrowsStateLike},
     },
     borrows_imgcat_debug,
@@ -428,8 +430,63 @@ impl<'a, 'tcx: 'a> Pcg<'a, 'tcx> {
         );
         if ctxt.is_loop_head(other_block) {
             actions.extend(slf.bridge_loop_expansions(target, self_block, other_block, ctxt)?);
+        } else {
+            for kind in slf.missing_lifetime_projection_views(target.borrow.graph(), ctxt) {
+                actions.push(
+                    BorrowPcgAction::add_edge(
+                        BorrowPcgEdge::new(kind, slf.borrow.validity_conditions.clone()),
+                        "bridge: a view that other paths to the join have",
+                    )
+                    .into(),
+                );
+            }
         }
         Ok(actions)
+    }
+
+    /// The expansions in `graph` of lifetime projections of owned places
+    /// that `self` lacks and can add: those of a current lifetime projection
+    /// into the current ones of the place's expansion, which reading through
+    /// the place creates and keeps after the place is collapsed, where the
+    /// lifetime projection is not blocked in `self`. A join adds them to the
+    /// predecessors that lack them, on the edges from those (see `bridge`):
+    /// a view that some paths to the join have is then on every path, rather
+    /// than on some paths only, where adding it again after the join would
+    /// expand it twice on the paths that have it.
+    pub(crate) fn missing_lifetime_projection_views(
+        &self,
+        graph: &BorrowsGraph<'tcx>,
+        ctxt: impl DataflowCtxt<'a, 'tcx>,
+    ) -> Vec<BorrowPcgEdgeKind<'tcx>> {
+        let own = self.borrow.graph();
+        graph
+            .edges()
+            .filter_map(|edge| {
+                let BorrowPcgEdgeKind::BorrowPcgExpansion(BorrowPcgExpansion::LifetimeProjection(
+                    expansion,
+                )) = edge.kind()
+                else {
+                    return None;
+                };
+                let base = expansion.base();
+                let current = |node: &LifetimeProjection<'tcx, MaybeLabelledPlace<'tcx>>| {
+                    node.label().is_none() && node.base().as_current_place().is_some()
+                };
+                if !current(&base)
+                    || base
+                        .base()
+                        .as_current_place()?
+                        .as_owned_place(ctxt)
+                        .is_none()
+                    || !expansion.expansion().iter().all(current)
+                    || own.edges().any(|own_edge| own_edge.kind() == edge.kind())
+                    || own.edges_blocking(base.into(), ctxt).next().is_some()
+                {
+                    return None;
+                }
+                Some(edge.kind().clone())
+            })
+            .collect()
     }
 
     /// Reconcile owned layouts and capabilities. Repacking can update borrow
