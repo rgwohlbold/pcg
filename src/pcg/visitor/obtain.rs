@@ -4,13 +4,14 @@ use crate::{
     HasSettings,
     action::{AppliedAction, BorrowPcgAction, OwnedPcgAction, PcgAction},
     borrow_pcg::{
-        self,
+        self, GeneralizedLifetime,
         action::{ApplyActionResult, BorrowPcgActionKind, LabelPlaceReason},
-        borrow_pcg_edge::BorrowPcgEdge,
+        borrow_pcg_edge::{BorrowPcgEdge, LocalNode},
         borrow_pcg_expansion::{BorrowPcgExpansion, PlaceExpansion},
         edge::{deref::DerefEdge, kind::BorrowPcgEdgeKind},
         edge_data::{EdgeData, LabelNodePredicate},
         graph::Conditioned,
+        region_projection::LifetimeProjectionLabel,
         state::{BorrowStateMutRef, BorrowsStateLike},
     },
     owned_pcg::{LocalExpansions, RepackOp},
@@ -206,7 +207,8 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
 
     /// If the following conditions apply:
     /// 1. `expansion` is a dereference of a place `p`
-    /// 2. `*p` does not contain any borrows
+    /// 2. `*p` has no lifetime projection of the region of `p`'s blocked
+    ///    lifetime projection (e.g. `'a` for `p: &'a mut &'b mut T`)
     /// 3. The target of this expansion is not labelled
     ///
     /// Then we perform an optimization where instead of connecting the blocked
@@ -214,10 +216,13 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
     /// the blocked lifetime projection.
     ///
     /// This is sound because the lifetime projection only contains the single
-    /// borrow that `p` refers to and therefore the set of borrows cannot be
-    /// changed. In other words, the set of borrows in the lifetime projection
-    /// at the point it was dereferenced is the same as the current set of
-    /// borrows in the lifetime projection.
+    /// borrow that `p` refers to, and a write through `*p` cannot store a
+    /// borrow of a region that `*p`'s type does not contain, so the set of
+    /// borrows cannot be changed. In other words, the set of borrows in the
+    /// lifetime projection at the point it was dereferenced is the same as the
+    /// current set of borrows in the lifetime projection. Nothing else gives
+    /// the labelled projection its contents back: `*p` has no projection that
+    /// flows into it, so it would remain as a leaf.
     ///
     /// Note the third condition: if the expansion is labelled, that indicates
     /// that the expansion occurred at a point where `p` had a different value
@@ -231,8 +236,17 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
         deref: &DerefEdge<'tcx>,
         context: &str,
     ) -> Result<(), PcgError> {
+        let blocked_region: GeneralizedLifetime<'tcx> =
+            deref.blocked_lifetime_projection.region(self.ctxt.ctxt());
         if deref.deref_place.is_current()
-            && deref.deref_place.lifetime_projections(self.ctxt).is_empty()
+            && !deref
+                .deref_place
+                .lifetime_projections(self.ctxt)
+                .iter()
+                .any(|rp| {
+                    let region: GeneralizedLifetime<'tcx> = rp.region(self.ctxt.ctxt());
+                    region == blocked_region
+                })
         {
             self.unlabel_source_lifetime_projections(deref, context)
         } else {
@@ -469,19 +483,16 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
                     )
                     .into(),
                 )?;
-                // `p` holds no value anymore, so its lifetime projections are
-                // earlier versions: they stood for its value before this point.
-                let label = self.prev_snapshot_location();
-                for rp in p.lifetime_projections(self.ctxt) {
-                    self.record_and_apply_action(
-                        BorrowPcgAction::label_lifetime_projection(
-                            LabelNodePredicate::postfix_lifetime_projection(rp.into()),
-                            Some(label.into()),
-                            "Label the lifetime projections of a weakened place",
-                        )
-                        .into(),
-                    )?;
-                }
+                // `p` holds no value anymore: its value left the place before
+                // this point, as when it is overwritten.
+                self.record_and_apply_action(
+                    BorrowPcgAction::label_place_and_update_related_capabilities(
+                        p,
+                        self.prev_snapshot_location(),
+                        LabelPlaceReason::Dead,
+                    )
+                    .into(),
+                )?;
             }
         }
         Ok(())
@@ -633,6 +644,7 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
                         label.reason,
                         LabelPlaceReason::StorageDead
                             | LabelPlaceReason::Write
+                            | LabelPlaceReason::Dead
                             | LabelPlaceReason::MoveOut
                     )
                     && let Some(index) = label.place.as_local()
@@ -723,6 +735,17 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
         let location = self.location();
         #[cfg(feature = "visualization")]
         let phase = self.phase();
+        let removed_from = match &action {
+            PcgAction::Borrow(borrow_action) => match &borrow_action.kind {
+                BorrowPcgActionKind::RemoveEdge(edge) => edge
+                    .value
+                    .blocked_nodes(self.ctxt.bc_ctxt())
+                    .filter_map(|node| node.as_local_node())
+                    .collect(),
+                _ => Vec::new(),
+            },
+            PcgAction::Owned(_) => Vec::new(),
+        };
         let mut applied = vec![AppliedAction::new(action, result)];
         if let Some((place, renamed)) = regained_renames {
             let mut label = BorrowPcgAction::label_lifetime_projection(
@@ -756,6 +779,50 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
                     );
                 }
                 actions.push(applied);
+            }
+        }
+        self.merge_leaf_earlier_versions(removed_from)
+    }
+
+    /// Replaces each of `nodes` that is an earlier version of a lifetime
+    /// projection (one with a location label) and a leaf by the projection's
+    /// latest version, the projection of the same place without that label.
+    /// An earlier version stands for the place's value at its label and passed
+    /// what it held on to the later versions; once the removal of an edge
+    /// makes it a leaf while edges still lead into it, e.g. when the place's
+    /// dereference is collapsed or the chain through a dead lifetime is
+    /// removed, the later versions have given it back to the place, so what
+    /// those edges are owed is held by the latest version. For a labelled
+    /// place, that is the version of the value the place held at the place's
+    /// label.
+    pub(crate) fn merge_leaf_earlier_versions(
+        &mut self,
+        nodes: Vec<LocalNode<'tcx>>,
+    ) -> Result<(), PcgError> {
+        for node in nodes {
+            let PcgNode::LifetimeProjection(projection) = node else {
+                continue;
+            };
+            if !matches!(
+                projection.label(),
+                Some(LifetimeProjectionLabel::Location(_))
+            ) {
+                continue;
+            }
+            let leaves = self
+                .pcg
+                .borrow
+                .graph()
+                .frozen_graph()
+                .leaf_nodes(self.ctxt.bc_ctxt());
+            if leaves.contains(&node) {
+                self.record_and_apply_action(
+                    BorrowPcgAction::remove_lifetime_projection_label(
+                        projection,
+                        "an earlier version that is a leaf is the current version",
+                    )
+                    .into(),
+                )?;
             }
         }
         Ok(())
@@ -898,6 +965,24 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
                     )
                     .into(),
                 )?;
+                // The sources moved back to `place` leave the earlier
+                // versions of its overwritten value without the edges out of
+                // them.
+                let versions = self
+                    .pcg
+                    .borrow
+                    .graph()
+                    .frozen_graph()
+                    .leaf_nodes(self.ctxt.bc_ctxt())
+                    .into_iter()
+                    .filter(|node| match node {
+                        PcgNode::LifetimeProjection(projection) => {
+                            place.is_prefix_of(projection.base.place())
+                        }
+                        PcgNode::Place(_) => false,
+                    })
+                    .collect();
+                self.merge_leaf_earlier_versions(versions)?;
             }
             self.restore_write_to_unblocked_leaves(place)?;
             self.render_debug_graph(None, "after step 1");

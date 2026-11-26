@@ -25,7 +25,7 @@ use crate::{
     utils::{PcgSettings, data_structures::HashSet, display::DisplayWithCompilerCtxt},
 };
 
-use super::PcgError;
+use super::{PcgError, PcgNode};
 use crate::{
     rustc_interface::middle::ty::{self},
     utils::{self, DataflowCtxt, SnapshotLocation},
@@ -217,7 +217,14 @@ impl<'a, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>> PcgVisitor<'_, 'a, 'tcx, Ctxt> 
         }
         let shape = call.shape(self.ctxt);
         self.create_edges_for_shape(&shape, &call)?;
-
-        Ok(())
+        // The versions of the projections that no edge of the call leads out
+        // of are given back what they hold when the call returns.
+        let versions = pre_rps
+            .iter()
+            .chain(post_rps.iter())
+            .filter_map(|rp| rp.try_to_local_lifetime_projection())
+            .map(PcgNode::LifetimeProjection)
+            .collect();
+        self.place_obtainer().merge_leaf_earlier_versions(versions)
     }
 }

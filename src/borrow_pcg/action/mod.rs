@@ -163,6 +163,10 @@ pub enum LabelPlaceReason {
     /// may still have capability.
     JoinOwnedReadAndWriteCapabilities,
     Write,
+    /// The place holds no value anymore because a lifetime projection of it
+    /// is dead, so it is weakened to [`CapabilityKind::Write`]. The value left
+    /// the place as when it is overwritten.
+    Dead,
     Collapse,
     /// Label lifetime projections of places that are mutated in a loop.
     JoinLoop,
@@ -186,7 +190,7 @@ impl LabelPlaceReason {
             | LabelPlaceReason::JoinOwnedReadAndWriteCapabilities => {
                 LabelNodePredicate::PlaceIsPostfixOf(place)
             }
-            LabelPlaceReason::Write => LabelNodePredicate::And(vec![
+            LabelPlaceReason::Write | LabelPlaceReason::Dead => LabelNodePredicate::And(vec![
                 LabelNodePredicate::PlaceIsPostfixOf(place),
                 // If the place is e.g *x or x.f, don't label it if it
                 // is the target of a borrow expansion or deref edge.
