@@ -201,16 +201,9 @@ impl<'pcg, 'a, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>> PcgVisitor<'pcg, 'a, 'tcx
     ) -> Result<(), PcgError> {
         let ctxt = self.ctxt;
         let source_region = source_proj.region(ctxt.ctxt());
-        let mut first_outlived = None;
-        let mut same_region = None;
         for target_proj in target.lifetime_projections(self.ctxt) {
             let target_region = target_proj.region(ctxt.ctxt());
             if self.outlives_generalized(source_region, target_region) {
-                first_outlived.get_or_insert(target_proj);
-                if same_region.is_none() && self.outlives_generalized(target_region, source_region)
-                {
-                    same_region = Some(target_proj);
-                }
                 self.record_and_apply_action(
                     BorrowPcgAction::add_edge(
                         BorrowPcgEdge::new(
@@ -228,9 +221,36 @@ impl<'pcg, 'a, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>> PcgVisitor<'pcg, 'a, 'tcx
                 )?;
             }
         }
-        if let PlaceOrConst::Place(base) = source_proj.base
-            && let Some(target_proj) = same_region.or(first_outlived)
-        {
+        self.redirect_future_edges_into(source_proj, target)
+    }
+
+    /// Moves the future edges of `source_proj`, which flows into `target`, to
+    /// the lifetime projection of `target` whose region equals the source's,
+    /// or else to the first one whose region the source's outlives (see
+    /// [`Self::connect_outliving_projections`]).
+    fn redirect_future_edges_into(
+        &mut self,
+        source_proj: LifetimeProjection<'tcx, PlaceOrConst<'tcx, MaybeLabelledPlace<'tcx>>>,
+        target: Place<'tcx>,
+    ) -> Result<(), PcgError> {
+        let ctxt = self.ctxt;
+        let PlaceOrConst::Place(base) = source_proj.base else {
+            return Ok(());
+        };
+        let source_region = source_proj.region(ctxt.ctxt());
+        let mut first_outlived = None;
+        let mut same_region = None;
+        for target_proj in target.lifetime_projections(self.ctxt) {
+            let target_region = target_proj.region(ctxt.ctxt());
+            if self.outlives_generalized(source_region, target_region) {
+                first_outlived.get_or_insert(target_proj);
+                if same_region.is_none() && self.outlives_generalized(target_region, source_region)
+                {
+                    same_region = Some(target_proj);
+                }
+            }
+        }
+        if let Some(target_proj) = same_region.or(first_outlived) {
             self.place_obtainer().redirect_source_of_future_edges(
                 source_proj.with_base(base),
                 target_proj.into(),
@@ -256,7 +276,7 @@ impl<'pcg, 'a, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>> PcgVisitor<'pcg, 'a, 'tcx
     ) -> Result<(), PcgError> {
         let ctxt = self.ctxt;
         for target_proj in target.lifetime_projections(self.ctxt) {
-            let outliving_sources = sources
+            let outliving = sources
                 .iter()
                 .filter(|(source_proj, _)| {
                     self.outlives_generalized(
@@ -264,9 +284,6 @@ impl<'pcg, 'a, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>> PcgVisitor<'pcg, 'a, 'tcx
                         target_proj.region(ctxt.ctxt()),
                     )
                 })
-                .collect::<Vec<_>>();
-            let outliving = outliving_sources
-                .iter()
                 .map(|(source_proj, operand_index)| {
                     (
                         source_proj.to_pcg_lifetime_projection(),
@@ -286,19 +303,9 @@ impl<'pcg, 'a, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>> PcgVisitor<'pcg, 'a, 'tcx
                     .into(),
                 )?;
             }
-            // Only the sources that flow into `target_proj` pass their future
-            // edges on to it; another source's would make `target_proj` give
-            // back loans it never received.
-            for (source_proj, _) in outliving_sources {
-                if let PlaceOrConst::Place(base) = source_proj.base {
-                    let local_source_proj = source_proj.with_base(base);
-                    self.place_obtainer().redirect_source_of_future_edges(
-                        local_source_proj,
-                        target_proj.into(),
-                        ctxt,
-                    )?;
-                }
-            }
+        }
+        for (source_proj, _) in sources {
+            self.redirect_future_edges_into(*source_proj, target)?;
         }
         Ok(())
     }
