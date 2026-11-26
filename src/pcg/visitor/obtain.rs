@@ -881,18 +881,24 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
                 )
                 .into(),
             )?;
-            self.record_and_apply_action(
-                BorrowPcgAction::label_lifetime_projection(
-                    LabelNodePredicate::And(vec![
-                        LabelNodePredicate::PlaceEquals(place),
-                        LabelNodePredicate::InSourceNodes,
-                        LabelNodePredicate::from_expansion_or_borrow_edge(),
-                    ]),
-                    None,
-                    "label place and update related capabilities",
-                )
-                .into(),
-            )?;
+            // A place whose storage ends is not written, so nothing new flows
+            // out of its future nodes: what flows into them from its
+            // borrowers still flows on, and they stay future on both sides
+            // of their future edges.
+            if obtain_type != ObtainType::ForStorageDead {
+                self.record_and_apply_action(
+                    BorrowPcgAction::label_lifetime_projection(
+                        LabelNodePredicate::And(vec![
+                            LabelNodePredicate::PlaceEquals(place),
+                            LabelNodePredicate::InSourceNodes,
+                            LabelNodePredicate::from_expansion_or_borrow_edge(),
+                        ]),
+                        None,
+                        "label place and update related capabilities",
+                    )
+                    .into(),
+                )?;
+            }
             self.restore_write_to_unblocked_leaves(place)?;
             self.render_debug_graph(None, "after step 1");
         }
