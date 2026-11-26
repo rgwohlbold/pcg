@@ -256,7 +256,7 @@ impl<'pcg, 'a, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>> PcgVisitor<'pcg, 'a, 'tcx
     ) -> Result<(), PcgError> {
         let ctxt = self.ctxt;
         for target_proj in target.lifetime_projections(self.ctxt) {
-            let outliving = sources
+            let outliving_sources = sources
                 .iter()
                 .filter(|(source_proj, _)| {
                     self.outlives_generalized(
@@ -264,6 +264,9 @@ impl<'pcg, 'a, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>> PcgVisitor<'pcg, 'a, 'tcx
                         target_proj.region(ctxt.ctxt()),
                     )
                 })
+                .collect::<Vec<_>>();
+            let outliving = outliving_sources
+                .iter()
                 .map(|(source_proj, operand_index)| {
                     (
                         source_proj.to_pcg_lifetime_projection(),
@@ -283,7 +286,10 @@ impl<'pcg, 'a, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>> PcgVisitor<'pcg, 'a, 'tcx
                     .into(),
                 )?;
             }
-            for (source_proj, _) in sources {
+            // Only the sources that flow into `target_proj` pass their future
+            // edges on to it; another source's would make `target_proj` give
+            // back loans it never received.
+            for (source_proj, _) in outliving_sources {
                 if let PlaceOrConst::Place(base) = source_proj.base {
                     let local_source_proj = source_proj.with_base(base);
                     self.place_obtainer().redirect_source_of_future_edges(
