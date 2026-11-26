@@ -465,6 +465,19 @@ impl<'pcg, 'a: 'pcg, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx> + DebugCtxt>
                 };
             }
 
+            // The contents of a lifetime projection of an expanded owned
+            // place are held by the projections of the parts it is expanded
+            // into, so it gives nothing back until the expansion is collapsed.
+            if let PcgNode::LifetimeProjection(_) = p
+                && let Some(current) = place.as_current_place()
+                && self.pcg.owned[current.local].is_allocated()
+                && self.pcg.owned[current.local]
+                    .expansions()
+                    .contains_expansion_from(current)
+            {
+                return ShouldKillNode::No;
+            }
+
             if p.is_place()
                 && !place.place().projection.is_empty()
                 && !fg.has_edge_blocking(place.into(), ctxt)

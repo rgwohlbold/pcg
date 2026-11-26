@@ -6,16 +6,18 @@ struct Foo<T> {
     f: T,
 }
 
-// Writing through `foo.f` expands `foo`; when the expansion ends, the earlier
-// version that the aggregate edge from `_3` leads into becomes the current
-// version, which the aggregate edge then leads into.
+// Writing through `foo.f` expands `foo`. The aggregate edge from `_3` is
+// removed only after `foo` is collapsed, which makes the future version of
+// `foo`'s projection current, and after the earlier version it leads into has
+// become the latest version of `foo`'s value, which is dead by then.
 fn aggregate_into_expanded_place() {
     let mut a = 1;
     let foo = Foo { f: &mut a };
     *foo.f = 2;
-    // PCG: bb0[10] pre_operands: Unlabel lifetime projection foo↓'?5 before bb0[9]:PreMain
-    // PCG: bb0[10] pre_operands: Remove Edge aggregate {_3 before bb0[6]:PostOperands↓'?6} -> foo↓'?5
-    // ~PCG: bb0[10] pre_operands: Remove Edge aggregate {_3 before bb0[6]:PostOperands↓'?6} -> foo↓'?5 before bb0[9]:PreMain
+    // PCG: bb0[10] pre_operands: Unlabel lifetime projection foo↓'?5 FUTURE
+    // PCG: bb0[10] pre_operands: Unlabel lifetime projection foo before bb0[10]:PreOperands↓'?5 before bb0[9]:PreMain
+    // PCG: bb0[10] pre_operands: Remove Edge aggregate {_3 before bb0[6]:PostOperands↓'?6} -> foo before bb0[10]:PreOperands↓'?5
+    // ~PCG: bb0[10] pre_operands: Remove Edge aggregate {_3 before bb0[6]:PostOperands↓'?6} -> foo↓'?5
 }
 
 // Dereferencing `y` labels its own lifetime projection, which `*y` has no

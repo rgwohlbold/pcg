@@ -138,6 +138,10 @@ impl<'pcg, 'a, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>> PcgVisitor<'pcg, 'a, 'tcx
             EvalStmtPhase::PreOperands => {
                 self.perform_borrow_initial_pre_operand_actions()?;
                 self.place_obtainer().collapse_owned_places()?;
+                // What the collapses joined back into their places can now be
+                // given back by the edges out of those places' projections.
+                self.place_obtainer()
+                    .pack_old_and_dead_borrow_leaves(None)?;
                 for triple in &self.tw.operand_triples {
                     tracing::debug!("Require triple {triple:?}");
                     self.require_triple(*triple)?;
