@@ -83,11 +83,18 @@ use crate::{
         graph::BorrowsGraph,
         region_projection::{LifetimeProjectionLabel, PlaceOrConst},
         validity_conditions::{ValidityConditions, ValidityConditionsLike},
+        visitor::{GeneralizedLifetime, OpaqueTy},
     },
     pcg::{
         CapabilityKind, EvalStmtPhase, Pcg, PcgNode, place_capabilities::PlaceCapabilitiesReader,
     },
-    rustc_interface::middle::mir::{self, BasicBlock},
+    rustc_interface::{
+        hir::def_id::DefId,
+        middle::{
+            mir::{self, BasicBlock},
+            ty,
+        },
+    },
     utils::{
         CompilerCtxt, Place,
         display::DisplayWithCtxt,
@@ -255,6 +262,53 @@ fn is_future(n: Node<'_>) -> bool {
     matches!(n, PcgNode::LifetimeProjection(lp) if lp.label() == Some(LifetimeProjectionLabel::Future))
 }
 
+/// Whether `lifetime` occurs in `ty` as the lifetime of a mutable reference
+/// reached through mutable references only, or may (see
+/// [`Replay::carries_mutable_loan`]).
+fn mutable_occurrence<'tcx>(
+    ty: ty::Ty<'tcx>,
+    lifetime: GeneralizedLifetime<'tcx>,
+    tcx: ty::TyCtxt<'tcx>,
+    visited: &mut HashSet<DefId>,
+) -> bool {
+    let rec =
+        |ty: ty::Ty<'tcx>, visited: &mut HashSet<_>| mutable_occurrence(ty, lifetime, tcx, visited);
+    match ty.kind() {
+        ty::TyKind::Ref(region, inner, mutability) => {
+            mutability.is_mut()
+                && (lifetime == GeneralizedLifetime::Region((*region).into())
+                    || rec(*inner, visited))
+        }
+        ty::TyKind::RawPtr(inner, mutability) => mutability.is_mut() && rec(*inner, visited),
+        ty::TyKind::Adt(def, args) => {
+            if def.is_box() {
+                return rec(args.type_at(0), visited);
+            }
+            if !visited.insert(def.did()) {
+                return false;
+            }
+            def.all_fields()
+                .any(|field| rec(crate::rustc_interface::field_ty(field, tcx, args), visited))
+        }
+        ty::TyKind::Tuple(tys) => tys.iter().any(|ty| rec(ty, visited)),
+        ty::TyKind::Array(elem, _) | ty::TyKind::Slice(elem) => rec(*elem, visited),
+        ty::TyKind::Closure(_, args) => rec(args.as_closure().tupled_upvars_ty(), visited),
+        ty::TyKind::Param(_) => OpaqueTy::try_from(ty)
+            .is_ok_and(|opaque| lifetime == GeneralizedLifetime::RegionsIn(opaque)),
+        ty::TyKind::Bool
+        | ty::TyKind::Char
+        | ty::TyKind::Int(_)
+        | ty::TyKind::Uint(_)
+        | ty::TyKind::Float(_)
+        | ty::TyKind::Str
+        | ty::TyKind::Never
+        | ty::TyKind::FnDef(..)
+        | ty::TyKind::FnPtr(..) => false,
+        // Aliases, trait objects and the rest: conservatively.
+        _ => true,
+    }
+}
+
 /// Whether the node is a lifetime projection of a labelled place.
 fn has_labelled_base(n: Node<'_>) -> bool {
     matches!(
@@ -278,14 +332,11 @@ fn is_const(n: Node<'_>) -> bool {
 
 /// Whether the node holds contents outside the borrow graph: a place, a node
 /// of the caller, or a lifetime projection of a constant.
-fn is_owned(n: Node<'_>) -> bool {
+fn is_outside(n: Node<'_>) -> bool {
     !is_lp(n) || is_remote(n) || is_const(n)
 }
 
 /// A lifetime projection whose contents the replay tracks.
-fn is_tracked(n: Node<'_>) -> bool {
-    is_lp(n) && !is_owned(n)
-}
 
 /// Whether the lifetime projection carries a label (other than the future
 /// label), or its base is a labelled place.
@@ -404,12 +455,12 @@ impl<'tcx> Graph<'tcx> {
     }
 
     /// The nodes that hold their contents according to the graph's shape.
-    fn leaves(&self) -> HashSet<Node<'tcx>> {
+    fn leaves(&self, tracked: &impl Fn(Node<'tcx>) -> bool) -> HashSet<Node<'tcx>> {
         let blocked = self.blocked();
         self.nodes()
             .into_iter()
             .filter(|n| {
-                is_tracked(*n) && !is_future(*n) && !blocked.contains(n) && !self.has_no_value(*n)
+                tracked(*n) && !is_future(*n) && !blocked.contains(n) && !self.has_no_value(*n)
             })
             .collect()
     }
@@ -462,6 +513,8 @@ struct Report {
 
 struct Replay<'a, 'tcx> {
     ctxt: CompilerCtxt<'a, 'tcx>,
+    /// Whether a lifetime projection carries a mutable loan, by node.
+    mutable_loan: std::cell::RefCell<HashMap<Node<'tcx>, bool>>,
     report: Report,
     /// The location being replayed, for the report.
     at: String,
@@ -470,6 +523,41 @@ struct Replay<'a, 'tcx> {
 }
 
 impl<'a, 'tcx> Replay<'a, 'tcx> {
+    /// Whether the node holds contents outside the tracked part of the
+    /// borrow graph: a place, a node of the caller, a lifetime projection of
+    /// a constant, or a lifetime projection that carries no mutable loan
+    /// (e.g. of a shared reference: its predicate is `true`).
+    fn is_owned(&self, n: Node<'tcx>) -> bool {
+        is_outside(n) || !self.carries_mutable_loan(n)
+    }
+
+    /// A lifetime projection whose contents the replay tracks.
+    fn is_tracked(&self, n: Node<'tcx>) -> bool {
+        is_lp(n) && !self.is_owned(n)
+    }
+
+    /// Whether the lifetime projection's lifetime is that of a mutable
+    /// reference in its place's type, reached through mutable references
+    /// only (a mutable reference behind a shared one is frozen). A type
+    /// parameter's `RegionsIn(T)`, an alias and a trait object may hold
+    /// mutable references and count as carrying one.
+    fn carries_mutable_loan(&self, n: Node<'tcx>) -> bool {
+        let PcgNode::LifetimeProjection(lp) = n else {
+            return false;
+        };
+        let PlaceOrConst::Place(MaybeRemotePlace::Local(base)) = lp.base else {
+            return false;
+        };
+        if let Some(known) = self.mutable_loan.borrow().get(&n) {
+            return *known;
+        }
+        let lifetime: GeneralizedLifetime<'tcx> = lp.region(self.ctxt);
+        let ty = base.place().ty(self.ctxt).ty;
+        let result = mutable_occurrence(ty, lifetime, self.ctxt.tcx(), &mut HashSet::default());
+        self.mutable_loan.borrow_mut().insert(n, result);
+        result
+    }
+
     fn show(&self, n: Node<'tcx>) -> String {
         n.display_string(self.ctxt)
     }
@@ -511,7 +599,7 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
                 // brings them along (rule 5).
                 if !edge.class.is_future() {
                     for s in &edge.sources {
-                        if is_tracked(*s) && !is_future(*s) && !before.contains(s) {
+                        if self.is_tracked(*s) && !is_future(*s) && !before.contains(s) {
                             state.full.insert(*s);
                         }
                     }
@@ -546,7 +634,7 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
         for n in state.graph.nodes() {
             if !before.contains(&n)
                 && !renamed_to.contains(&n)
-                && is_tracked(n)
+                && self.is_tracked(n)
                 && !is_future(n)
                 && !is_labelled(n)
                 && !state.graph.has_incoming(n)
@@ -562,7 +650,7 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
             .filter(|e| matches!(e.class, EdgeClass::Deref))
             .filter(|e| e.targets.iter().any(|t| !is_lp(*t)))
             .flat_map(|e| e.sources.iter().copied())
-            .filter(|s| is_tracked(*s) && state.full.contains(s))
+            .filter(|s| self.is_tracked(*s) && state.full.contains(s))
             .collect::<Vec<_>>();
         for s in emptied {
             state.full.remove(&s);
@@ -597,7 +685,7 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
         // Future nodes that become current take from the sources of the
         // future edges into them (rule 2).
         for (from, to) in &ordered {
-            if !is_future(*from) || is_future(*to) {
+            if !is_future(*from) || is_future(*to) || !self.is_tracked(*to) {
                 continue;
             }
             let into_from = old
@@ -661,6 +749,9 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
                     state.full.remove(&g);
                     state.gave_to_future.insert(g);
                 }
+            } else if givers.iter().any(|g| !is_future(*g) && self.is_owned(*g)) {
+                // A giver outside the tracked graph gives from outside.
+                state.full.insert(*to);
             } else if !givers.is_empty() {
                 self.report.rule_p_failures.push(json!({
                     "at": self.at,
@@ -721,10 +812,15 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
             .sources
             .iter()
             .copied()
-            .filter(|s| is_tracked(*s) && state.full.contains(s))
+            .filter(|s| self.is_tracked(*s) && state.full.contains(s))
             .collect::<Vec<_>>();
-        if targets.iter().any(|t| is_owned(*t)) {
-            // A lifetime projection passes what it holds on to places.
+        let targets = targets
+            .into_iter()
+            .filter(|t| self.is_tracked(*t))
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
+            // A lifetime projection passes what it holds on to places (or
+            // to projections the replay does not track).
             for s in full_sources {
                 state.full.remove(&s);
                 state.spent.insert(s);
@@ -735,7 +831,7 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
             || edge
                 .sources
                 .iter()
-                .any(|s| state.full.contains(s) || state.spent.contains(s) || is_owned(*s));
+                .any(|s| state.full.contains(s) || state.spent.contains(s) || self.is_owned(*s));
         if feeds {
             for s in full_sources {
                 if !targets.contains(&s) {
@@ -767,7 +863,7 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
             .sources
             .iter()
             .copied()
-            .filter(|s| is_tracked(*s) && !is_future(*s))
+            .filter(|s| self.is_tracked(*s) && !is_future(*s))
             .collect::<Vec<_>>();
         if matches!(edge.class, EdgeClass::Outlives { equal: false }) {
             // Next to a mutable borrow, the borrow edge returns the contents.
@@ -776,7 +872,12 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
                 return;
             }
         }
-        if edge.targets.iter().any(|t| !is_future(*t) && is_owned(*t)) {
+        if edge
+            .targets
+            .iter()
+            .filter(|t| !is_future(**t))
+            .all(|t| self.is_owned(*t))
+        {
             // What a projection passed on to places comes back from them.
             state.full.extend(tracked_sources);
             return;
@@ -801,7 +902,7 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
             .iter()
             .filter(|e| e.targets.contains(&n))
             .map(|e| {
-                let from_place = if e.sources.iter().any(|s| is_owned(*s)) {
+                let from_place = if e.sources.iter().any(|s| self.is_owned(*s)) {
                     "(from place)"
                 } else {
                     ""
@@ -843,7 +944,11 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
             .iter()
             .filter(|e| e.sources.contains(&n) && e.blocks())
             .map(|e| {
-                let to_place = if e.targets.iter().any(|t| !is_future(*t) && is_owned(*t)) {
+                let to_place = if e
+                    .targets
+                    .iter()
+                    .any(|t| !is_future(*t) && self.is_owned(*t))
+                {
                     "(to place)"
                 } else {
                     ""
@@ -899,7 +1004,7 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
                 ),
             }));
         }
-        let mut leaves = actual.leaves();
+        let mut leaves = actual.leaves(&|n| self.is_tracked(n));
         // Rule 8: an output of a call that gave its contents back to its
         // lender through a future edge holds nothing, although it stays a
         // leaf of the call's edge (which the call's other outputs still need).
@@ -1075,6 +1180,7 @@ pub fn replay(output: &mut PcgOutput<'_, '_>) -> Value {
     let function = ctxt.body_def_path_str();
     let mut replay = Replay {
         ctxt,
+        mutable_loan: Default::default(),
         report: Report::default(),
         at: String::new(),
         stmt: String::new(),
@@ -1112,7 +1218,7 @@ pub fn replay(output: &mut PcgOutput<'_, '_>) -> Value {
             .collect::<Vec<_>>();
         let full = match incoming.first() {
             Some(Some(first)) if incoming.iter().all(|s| *s == Some(*first)) => (*first).clone(),
-            _ => entry.leaves(),
+            _ => entry.leaves(&|n| replay.is_tracked(n)),
         };
         let mut state = State {
             graph: entry,
@@ -1134,7 +1240,7 @@ pub fn replay(output: &mut PcgOutput<'_, '_>) -> Value {
                     },
                     ctxt,
                 );
-                let start_leaves = state.graph.leaves();
+                let start_leaves = state.graph.leaves(&|n| replay.is_tracked(n));
                 for action in stmt.actions(phase).iter() {
                     replay.apply_action(&mut state, action);
                 }
