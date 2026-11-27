@@ -93,7 +93,14 @@ impl<'tcx> EdgesToRemove<'tcx> {
                 deref_edges.reason,
             ));
         }
-        for edge in self.other_edges {
+        // Removing a borrow restores the borrowed place, whose future nodes
+        // then take what flows back into them: the other edges, which can
+        // give contents back on the way, are removed first.
+        let (borrows, others): (Vec<_>, Vec<_>) = self
+            .other_edges
+            .into_iter()
+            .partition(|edge| matches!(edge.value.kind(), BorrowPcgEdgeKind::Borrow(_)));
+        for edge in others.into_iter().chain(borrows) {
             actions.push(RemovalAction::RemoveOtherEdge(edge.value, edge.reason));
         }
         actions

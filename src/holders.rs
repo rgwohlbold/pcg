@@ -577,6 +577,10 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
     ) -> HashSet<Node<'tcx>> {
         let renames: HashMap<Node<'tcx>, Node<'tcx>> =
             renamed.iter().map(|r| (r.from(), r.to())).collect();
+        // A fixed order: when the future nodes of two lenders become current
+        // in one action and share a giver, the first one takes from it.
+        let mut ordered = renames.iter().map(|(f, t)| (*f, *t)).collect::<Vec<_>>();
+        ordered.sort_by_cached_key(|(f, t)| (self.show(*f), self.show(*t)));
         for (from, to) in &renames {
             tracing::debug!(
                 target: "pcg::holders",
@@ -592,7 +596,7 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
         state.graph.rename(&renames);
         // Future nodes that become current take from the sources of the
         // future edges into them (rule 2).
-        for (from, to) in &renames {
+        for (from, to) in &ordered {
             if !is_future(*from) || is_future(*to) {
                 continue;
             }
@@ -680,7 +684,7 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
         }
         // Fullness follows the other renamed nodes (rule 1).
         let mut moved_full = Vec::new();
-        for (from, to) in &renames {
+        for (from, to) in &ordered {
             if is_future(*from) && !is_future(*to) {
                 continue;
             }
