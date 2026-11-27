@@ -49,6 +49,10 @@ pub(crate) struct ConstructAbstractionGraphResult<'tcx> {
     /// Local root places that are actually blocked by the loop abstraction.
     /// Their mutable-reference ancestors must be downgraded from E to W.
     pub(crate) blocked_root_places: HashSet<Place<'tcx>>,
+    /// The current lifetime projections that a dereference of the
+    /// abstraction snapshots under another label than the loop head's, with
+    /// that label: the incoming graph's current versions get it as well.
+    pub(crate) deref_snapshots: Vec<(LabelNodePredicate<'tcx>, LifetimeProjectionLabel)>,
 }
 
 impl<'tcx> ConstructAbstractionGraphResult<'tcx> {
@@ -57,12 +61,14 @@ impl<'tcx> ConstructAbstractionGraphResult<'tcx> {
         to_label: HashSet<LabelNodePredicate<'tcx>>,
         capability_updates: HashMap<Place<'tcx>, Option<CapabilityKind>>,
         blocked_root_places: HashSet<Place<'tcx>>,
+        deref_snapshots: Vec<(LabelNodePredicate<'tcx>, LifetimeProjectionLabel)>,
     ) -> Self {
         Self {
             graph,
             to_label,
             capability_updates,
             blocked_root_places,
+            deref_snapshots,
         }
     }
 }
@@ -279,17 +285,32 @@ impl<'tcx> BorrowsGraph<'tcx> {
         // the reference's lifetime projection at the loop head, since the loop
         // may change what it stands for by writing through the reference. The
         // incoming graph's versions of that projection are the same node and
-        // are labelled the same way.
+        // are labelled the same way. A shared dereference snapshots it after
+        // the borrow that blocks the reference instead; the incoming graph's
+        // current version gets that label.
+        let mut deref_snapshots = Vec::new();
         for edge in graph.edges() {
             if let BorrowPcgEdgeKind::Deref(deref) = edge.kind()
-                && deref.blocked_lifetime_projection.label() == Some(loop_head_label)
                 && let MaybeLabelledPlace::Current(reference) =
                     deref.blocked_lifetime_projection.base
             {
-                to_label.insert(LabelNodePredicate::all_non_future(
-                    reference.into(),
-                    deref.blocked_lifetime_projection.region_idx,
-                ));
+                match deref.blocked_lifetime_projection.label() {
+                    Some(label) if label == loop_head_label => {
+                        to_label.insert(LabelNodePredicate::all_non_future(
+                            reference.into(),
+                            deref.blocked_lifetime_projection.region_idx,
+                        ));
+                    }
+                    Some(label @ LifetimeProjectionLabel::Location(_)) => {
+                        deref_snapshots.push((
+                            LabelNodePredicate::equals_lifetime_projection(
+                                deref.blocked_lifetime_projection.with_label(None, ctxt),
+                            ),
+                            label,
+                        ));
+                    }
+                    _ => {}
+                }
             }
         }
         let frozen_graph = graph.frozen_graph();
@@ -351,6 +372,7 @@ impl<'tcx> BorrowsGraph<'tcx> {
             to_label,
             capability_updates,
             blocked_root_places,
+            deref_snapshots,
         )
     }
 

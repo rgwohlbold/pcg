@@ -447,6 +447,7 @@ impl<'tcx> BorrowsGraph<'tcx> {
             to_label,
             capability_updates,
             blocked_root_places,
+            deref_snapshots,
         } = self.get_loop_abstraction_graph(
             &loop_blocked_places,
             &root_places,
@@ -467,6 +468,9 @@ impl<'tcx> BorrowsGraph<'tcx> {
         let loop_head_label = LifetimeProjectionLabel::Location(SnapshotLocation::Loop(loop_head));
         for rp in &to_label {
             self.label_lifetime_projections(rp, Some(loop_head_label), ctxt);
+        }
+        for (rp, label) in &deref_snapshots {
+            self.label_lifetime_projections(rp, Some(*label), ctxt);
         }
 
         // The abstraction has a placeholder for a projection of a current
