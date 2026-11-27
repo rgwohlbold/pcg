@@ -275,6 +275,23 @@ impl<'tcx> BorrowsGraph<'tcx> {
             "Abstraction graph after root reconnect",
         );
         let loop_head_label = LifetimeProjectionLabel::Location(SnapshotLocation::Loop(loop_head));
+        // A dereference that the abstraction adds to reach a place snapshots
+        // the reference's lifetime projection at the loop head, since the loop
+        // may change what it stands for by writing through the reference. The
+        // incoming graph's versions of that projection are the same node and
+        // are labelled the same way.
+        for edge in graph.edges() {
+            if let BorrowPcgEdgeKind::Deref(deref) = edge.kind()
+                && deref.blocked_lifetime_projection.label() == Some(loop_head_label)
+                && let MaybeLabelledPlace::Current(reference) =
+                    deref.blocked_lifetime_projection.base
+            {
+                to_label.insert(LabelNodePredicate::all_non_future(
+                    reference.into(),
+                    deref.blocked_lifetime_projection.region_idx,
+                ));
+            }
+        }
         let frozen_graph = graph.frozen_graph();
         tracing::debug!(
             "leaf edges: {}",
