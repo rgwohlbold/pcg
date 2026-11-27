@@ -27,7 +27,9 @@
 //!    current one): it takes the contents of the full sources of the
 //!    `FromBorrow` and `FromExpansion` future edges into it. If there are such
 //!    sources and none is full, the node takes nothing: a *rule P failure*.
-//!    Without such sources, it takes the contents of its earlier version (the
+//!    A source that is the future node of an earlier version of a place,
+//!    which no restore makes current, passes on what flows into it: its own
+//!    sources are taken from instead (transit). Without such sources, it takes the contents of its earlier version (the
 //!    source of a `ToFutureSelf` edge).
 //! 3. **An added edge** (other than a future edge) into a place empties its
 //!    full lifetime-projection sources (their contents leave the borrow graph). An added edge into
@@ -253,6 +255,15 @@ fn is_future(n: Node<'_>) -> bool {
     matches!(n, PcgNode::LifetimeProjection(lp) if lp.label() == Some(LifetimeProjectionLabel::Future))
 }
 
+/// Whether the node is a lifetime projection of a labelled place.
+fn has_labelled_base(n: Node<'_>) -> bool {
+    matches!(
+        n,
+        PcgNode::LifetimeProjection(lp)
+            if matches!(lp.base, PlaceOrConst::Place(MaybeRemotePlace::Local(p)) if p.is_old())
+    )
+}
+
 fn is_remote(n: Node<'_>) -> bool {
     matches!(
         n,
@@ -401,6 +412,12 @@ impl<'tcx> Graph<'tcx> {
                 is_tracked(*n) && !is_future(*n) && !blocked.contains(n) && !self.has_no_value(*n)
             })
             .collect()
+    }
+
+    fn renamed(&self, renames: &HashMap<Node<'tcx>, Node<'tcx>>) -> Self {
+        let mut graph = self.clone();
+        graph.rename(renames);
+        graph
     }
 
     fn rename(&mut self, renames: &HashMap<Node<'tcx>, Node<'tcx>>) {
@@ -598,8 +615,37 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
                     .flat_map(|e| e.sources.iter().copied())
                     .collect::<HashSet<_>>()
             };
-            let givers = sources(false);
             let selves = sources(true);
+            // A future node of an earlier version of a place is never made
+            // current by a restore: what flows into it passes on to the node
+            // it leads into. Its givers are taken from instead (transit).
+            let renamed_old = old.renamed(&renames);
+            let mut givers: HashSet<Node<'tcx>> = HashSet::default();
+            let mut visited: HashSet<Node<'tcx>> = HashSet::default();
+            let mut todo = sources(false).into_iter().collect::<Vec<_>>();
+            while let Some(g) = todo.pop() {
+                if !visited.insert(g) {
+                    continue;
+                }
+                if is_future(g) && has_labelled_base(g) {
+                    todo.extend(
+                        renamed_old
+                            .edges
+                            .iter()
+                            .filter(|e| {
+                                matches!(
+                                    e.class,
+                                    EdgeClass::Future(
+                                        FutureClass::FromBorrow | FutureClass::FromExpansion
+                                    )
+                                ) && e.targets.contains(&g)
+                            })
+                            .flat_map(|e| e.sources.iter().copied()),
+                    );
+                } else {
+                    givers.insert(g);
+                }
+            }
             let full_givers = givers
                 .iter()
                 .copied()
