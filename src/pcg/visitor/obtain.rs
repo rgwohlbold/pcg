@@ -652,19 +652,16 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
         Ctxt: HasBorrowCheckerCtxt<'a, 'tcx> + HasSettings<'a>,
     {
         tracing::debug!("Applying Action: {}", action.debug_line(self.ctxt));
-        // Labelling a written or dead place does not label it where it is the
-        // source of a future edge from an expansion or a borrow: the edge
-        // then starts from the place's next value. So that the label renames
+        // Labelling a written place does not label it where it is the source
+        // of a future edge from an expansion or a borrow: the edge then
+        // starts from the place's next value. So that the label renames
         // the node everywhere it applies to, the action is surrounded by the
         // removal of these edges and their addition with the current node.
         if let PcgAction::Borrow(BorrowPcgAction {
             kind: BorrowPcgActionKind::LabelPlace(label),
             ..
         }) = &action
-            && matches!(
-                label.reason,
-                LabelPlaceReason::Write | LabelPlaceReason::Dead
-            )
+            && label.reason == LabelPlaceReason::Write
         {
             let kept = self.future_edges_from_current(label.place);
             if !kept.is_empty() {

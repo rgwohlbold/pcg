@@ -405,6 +405,9 @@ struct State<'tcx> {
     spent: HashSet<Node<'tcx>>,
     /// Nodes that gave their contents back in the current phase.
     gave: HashSet<Node<'tcx>>,
+    /// Nodes that gave their contents to a future node that became current
+    /// (rule 2) and have been empty since; for the report only.
+    gave_to_future: HashSet<Node<'tcx>>,
 }
 
 /// Counters and findings of the replay of one function.
@@ -590,6 +593,7 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
                 state.full.insert(*to);
                 for g in full_givers {
                     state.full.remove(&g);
+                    state.gave_to_future.insert(g);
                 }
             } else if !givers.is_empty() {
                 self.report.rule_p_failures.push(json!({
@@ -626,6 +630,9 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
             }
             if state.gave.remove(from) {
                 state.gave.insert(*to);
+            }
+            if state.gave_to_future.remove(from) {
+                state.gave_to_future.insert(*to);
             }
         }
         state.full.extend(moved_full);
@@ -848,9 +855,18 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
             }
             return true;
         }
+        state.gave_to_future.retain(|n| !state.full.contains(n));
         let missing_tags = missing
             .iter()
-            .map(|n| (self.show(*n), self.tag_missing(actual, *n)))
+            .map(|n| {
+                let tag = self.tag_missing(actual, *n);
+                let tag = if state.gave_to_future.contains(n) {
+                    format!("gave to future, {tag}")
+                } else {
+                    tag
+                };
+                (self.show(*n), tag)
+            })
             .collect::<Vec<_>>();
         let extra_tags = extra
             .iter()
