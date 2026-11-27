@@ -29,7 +29,9 @@
 //!    sources and none is full, the node takes nothing: a *rule P failure*.
 //!    A source that is the future node of an earlier version of a place,
 //!    which no restore makes current, passes on what flows into it: its own
-//!    sources are taken from instead (transit). Without such sources, it takes the contents of its earlier version (the
+//!    sources are taken from instead (transit). A source that gave to a future
+//!    node earlier in the phase can give to another one as well. Without such
+//!    sources, it takes the contents of its earlier version (the
 //!    source of a `ToFutureSelf` edge).
 //! 3. **An added edge** (other than a future edge) into a place empties its
 //!    full lifetime-projection sources (their contents leave the borrow graph). An added edge into
@@ -519,6 +521,9 @@ struct State<'tcx> {
     full: HashSet<Node<'tcx>>,
     /// Nodes emptied by an added edge in the current phase.
     spent: HashSet<Node<'tcx>>,
+    /// Nodes that gave to a future node that became current in the current
+    /// phase: they can give to another one as well (rule 2).
+    gave_to_future_now: HashSet<Node<'tcx>>,
     /// Nodes that gave their contents back in the current phase.
     gave: HashSet<Node<'tcx>>,
     /// Nodes that gave their contents to a future node that became current
@@ -787,7 +792,13 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
                 for g in full_givers {
                     state.full.remove(&g);
                     state.gave_to_future.insert(g);
+                    state.gave_to_future_now.insert(g);
                 }
+            } else if givers.iter().any(|g| state.gave_to_future_now.contains(g)) {
+                // A node can give to several lenders that become current in
+                // one phase, e.g. the future nodes of two lifetimes of one
+                // reborrowed place.
+                state.full.insert(*to);
             } else if givers.iter().any(|g| !is_future(*g) && self.is_owned(*g)) {
                 // A giver outside the tracked graph gives from outside.
                 state.full.insert(*to);
@@ -829,6 +840,9 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
             }
             if state.gave_to_future.remove(from) {
                 state.gave_to_future.insert(*to);
+            }
+            if state.gave_to_future_now.remove(from) {
+                state.gave_to_future_now.insert(*to);
             }
             if state.lost.remove(from) {
                 state.lost.insert(*to);
@@ -1310,6 +1324,8 @@ pub fn replay<'tcx>(output: &mut PcgOutput<'_, 'tcx>) -> Value {
             for phase in EvalStmtPhase::phases() {
                 replay.report.phases += 1;
                 state.spent.clear();
+                state.gave_to_future_now.clear();
+                state.gave_to_future_now.clear();
                 state.gave.clear();
                 // Each phase starts from the PCG's state before it; within the
                 // phase, the graph changes only by the phase's actions.
@@ -1344,6 +1360,7 @@ pub fn replay<'tcx>(output: &mut PcgOutput<'_, 'tcx>) -> Value {
         for succ in &pcg_block.terminator.succs {
             let mut state = state.clone();
             state.spent.clear();
+            state.gave_to_future_now.clear();
             state.gave.clear();
             replay.at = format!("{block:?} -> {:?}", succ.block());
             for action in succ.actions().iter() {
