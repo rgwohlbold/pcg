@@ -402,6 +402,25 @@ pub(crate) trait PlaceCollapser<'a, 'tcx: 'a>:
                     }
                     if !still_expanded || changed_elsewhere {
                         self.create_aggregate_lifetime_projections(rp, rest, &rp_expansion, ctxt)?;
+                    } else {
+                        // The expansion ends with the parts' places: the
+                        // parts give back what it gave them.
+                        let expansions = self
+                            .borrows_state()
+                            .graph
+                            .edges()
+                            .filter(|edge| is_expansion_of_rp(edge.kind))
+                            .map(BorrowPcgEdgeLike::to_owned_edge)
+                            .collect::<Vec<_>>();
+                        for edge in expansions {
+                            self.apply_action(
+                                BorrowPcgAction::remove_edge(
+                                    edge,
+                                    "collapse: the parts give back what the expansion gave them",
+                                )
+                                .into(),
+                            )?;
+                        }
                     }
                 }
             }
