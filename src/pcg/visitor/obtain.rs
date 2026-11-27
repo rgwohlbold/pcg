@@ -173,13 +173,71 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
         let blocked_nodes = edge.blocked_nodes(self.ctxt.bc_ctxt());
 
         // After removing an edge, some nodes may become accessible, their capabilities should be restored
+        // A place's own expansion does not lend it if no part of it is lent
+        // mutably or awaits contents back through a future node: e.g. a place that a loop head holds at exclusive capability
+        // while it is expanded for a shared borrow through a shared reference
+        // in it is unblocked once the borrows of the place itself end.
+        let ctxt = self.ctxt;
+        // The places with a future lifetime projection in the graph: what
+        // flows back into them has not come back yet.
+        let awaiting: HashSet<Place<'tcx>> = graph
+            .edges()
+            .flat_map(|edge| {
+                edge.kind()
+                    .blocked_by_nodes(ctxt.bc_ctxt())
+                    .collect::<Vec<_>>()
+            })
+            .filter_map(|node| match node {
+                PcgNode::LifetimeProjection(rp) if rp.is_future() => rp.base.as_current_place(),
+                _ => None,
+            })
+            .collect();
+        let only_read_below = |part: PcgNode<'tcx>| {
+            let mut todo = vec![part];
+            let mut seen = HashSet::default();
+            while let Some(node) = todo.pop() {
+                if !seen.insert(node) {
+                    continue;
+                }
+                if node
+                    .as_current_place()
+                    .is_some_and(|place| awaiting.contains(&place))
+                {
+                    return false;
+                }
+                for blocking in graph.edges_blocking(node, ctxt.bc_ctxt()) {
+                    match blocking.kind {
+                        BorrowPcgEdgeKind::BorrowPcgExpansion(BorrowPcgExpansion::Place(
+                            expansion,
+                        )) if PcgNode::from(expansion.base()) == node => {
+                            todo.extend(expansion.expansion().iter().map(|p| PcgNode::from(*p)));
+                        }
+                        BorrowPcgEdgeKind::Deref(deref)
+                            if deref.blocked_place().place().is_shared_ref(ctxt) => {}
+                        BorrowPcgEdgeKind::Borrow(borrow) if !borrow.is_mut() => {}
+                        _ => return false,
+                    }
+                }
+            }
+            true
+        };
         let to_restore = blocked_nodes
             .into_iter()
             .filter(|node| {
                 graph
                     .edges_blocking(*node, self.ctxt.bc_ctxt())
-                    .next()
-                    .is_none()
+                    .all(|blocking| {
+                        matches!(
+                            blocking.kind,
+                            BorrowPcgEdgeKind::BorrowPcgExpansion(BorrowPcgExpansion::Place(
+                                expansion
+                            )) if PcgNode::from(expansion.base()) == *node
+                                && expansion
+                                    .expansion()
+                                    .iter()
+                                    .all(|part| only_read_below(PcgNode::from(*part)))
+                        )
+                    })
             })
             .collect::<Vec<_>>();
 
