@@ -990,19 +990,24 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
             tracing::debug!(
                 "labeling and removing capabilities for deref projections of postfix places"
             );
+            // A place whose storage ends, or that is dropped, gets no new
+            // value: it is labelled as dead, also where it is the source of a
+            // future edge, and nothing new flows out of its future nodes: what
+            // flows into them from its borrowers still flows on, and they stay
+            // future on both sides of their future edges.
             self.record_and_apply_action(
                 BorrowPcgAction::label_place_and_update_related_capabilities(
                     place,
                     self.prev_snapshot_location(),
-                    LabelPlaceReason::Write,
+                    if obtain_type.ends_value() {
+                        LabelPlaceReason::Dead
+                    } else {
+                        LabelPlaceReason::Write
+                    },
                 )
                 .into(),
             )?;
-            // A place whose storage ends is not written, so nothing new flows
-            // out of its future nodes: what flows into them from its
-            // borrowers still flows on, and they stay future on both sides
-            // of their future edges.
-            if obtain_type != ObtainType::ForStorageDead {
+            if !obtain_type.ends_value() {
                 self.record_and_apply_action(
                     BorrowPcgAction::label_lifetime_projection(
                         LabelNodePredicate::And(vec![

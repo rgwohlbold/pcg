@@ -2,16 +2,28 @@ use crate::{
     borrow_pcg::edge::kind::BorrowPcgEdgeKind,
     error::PcgError,
     pcg::{
-        PcgRefLike,
+        CapabilityKind, PcgRefLike,
         obtain::ObtainType,
         triple::{PlaceCondition, Triple},
     },
+    rustc_interface::middle::mir,
     utils::{DataflowCtxt, Place},
 };
 
 use super::PcgVisitor;
 
 impl<'a, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>> PcgVisitor<'_, 'a, 'tcx, Ctxt> {
+    /// Whether the current location is a `Drop` terminator that drops `place`.
+    fn drops(&self, place: Place<'tcx>) -> bool {
+        let location = self.location();
+        let data = &self.ctxt.body()[location.block];
+        location.statement_index == data.statements.len()
+            && matches!(
+                data.terminator().kind,
+                mir::TerminatorKind::Drop { place: dropped, .. } if Place::from(dropped) == place
+            )
+    }
+
     #[tracing::instrument(skip(self))]
     pub(crate) fn require_triple(&mut self, triple: Triple<'tcx>) -> Result<(), PcgError> {
         match triple.pre() {
@@ -20,8 +32,12 @@ impl<'a, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>> PcgVisitor<'_, 'a, 'tcx, Ctxt> 
                     .obtain(place, ObtainType::TwoPhaseExpand)?;
             }
             PlaceCondition::Capability(place, capability) => {
-                self.place_obtainer()
-                    .obtain(place, ObtainType::Capability(capability))?;
+                let obtain_type = if capability == CapabilityKind::Write && self.drops(place) {
+                    ObtainType::ForDrop
+                } else {
+                    ObtainType::Capability(capability)
+                };
+                self.place_obtainer().obtain(place, obtain_type)?;
             }
             PlaceCondition::AllocateOrDeallocate(local) => {
                 if self.pcg.owned[local].is_unallocated() {

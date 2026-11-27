@@ -91,6 +91,9 @@ impl<'state, 'tcx, Ctxt> PlaceObtainer<'state, '_, 'tcx, Ctxt> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ObtainType {
     ForStorageDead,
+    /// Write capability for the place a `Drop` terminator drops: unlike a
+    /// write, the place gets no new value.
+    ForDrop,
     Capability(CapabilityKind),
     TwoPhaseExpand,
     LoopInvariant {
@@ -100,6 +103,12 @@ pub(crate) enum ObtainType {
 }
 
 impl ObtainType {
+    /// Whether the obtained place loses its value without getting a new one
+    /// (its storage ends, or it is dropped).
+    pub(crate) fn ends_value(self) -> bool {
+        matches!(self, ObtainType::ForStorageDead | ObtainType::ForDrop)
+    }
+
     /// The capability to use when generating expand annotations.
     ///
     /// If the expansion is for a place e.g. `x.f` where `x` currently has
@@ -120,7 +129,11 @@ impl ObtainType {
     where
         'tcx: 'a,
     {
-        if self == ObtainType::Capability(CapabilityKind::Write) && current_cap.is_exclusive() {
+        if matches!(
+            self,
+            ObtainType::Capability(CapabilityKind::Write) | ObtainType::ForDrop
+        ) && current_cap.is_exclusive()
+        {
             CapabilityKind::Exclusive
         } else {
             self.capability(place, ctxt)
@@ -135,7 +148,7 @@ impl ObtainType {
         'tcx: 'a,
     {
         match self {
-            ObtainType::ForStorageDead => CapabilityKind::Write,
+            ObtainType::ForStorageDead | ObtainType::ForDrop => CapabilityKind::Write,
             ObtainType::Capability(cap) => cap,
             ObtainType::TwoPhaseExpand => CapabilityKind::Read,
             ObtainType::LoopInvariant {
@@ -170,7 +183,7 @@ impl ObtainType {
             ObtainType::LoopInvariant { .. } => {
                 place.is_mutable(LocalMutationIsAllowed::Yes, ctxt).is_ok()
             }
-            ObtainType::ForStorageDead | ObtainType::Capability(_) => true,
+            ObtainType::ForStorageDead | ObtainType::ForDrop | ObtainType::Capability(_) => true,
         }
     }
 }
