@@ -130,17 +130,24 @@ where
         labeller: &impl PlaceLabeller<'tcx, Ctxt, P>,
         ctxt: Ctxt,
     ) -> HashSet<NodeReplacement<'tcx, P>> {
-        let blocked_places: Vec<&mut MaybeLabelledPlace<'tcx, P>> = vec![
-            &mut self.blocked_place,
-            &mut self.blocked_lifetime_projection.base,
-        ];
-        conditionally_label_places(
-            blocked_places,
+        let context = LabelNodeContext::new(SourceOrTarget::Source, BorrowPcgEdgeType::Deref);
+        let mut result = conditionally_label_places(
+            vec![&mut self.blocked_place],
             predicate,
             labeller,
-            LabelNodeContext::new(SourceOrTarget::Source, BorrowPcgEdgeType::Deref),
+            context,
             ctxt,
-        )
+        );
+        // The blocked lifetime projection is a node of its own: the predicate
+        // applies to it, and the renaming reported is its own.
+        result.extend(conditionally_label_places(
+            vec![&mut self.blocked_lifetime_projection],
+            predicate,
+            labeller,
+            context,
+            ctxt,
+        ));
+        result
     }
 
     fn label_blocked_by_places(
