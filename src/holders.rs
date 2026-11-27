@@ -1089,6 +1089,11 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
                 .collect::<Vec<_>>()
                 .join("; "),
         );
+        if tracing::enabled!(target: "pcg::holders", tracing::Level::DEBUG) {
+            for e in &actual.edges {
+                tracing::debug!(target: "pcg::holders", "  mismatch graph: {}", e.display(self.ctxt));
+            }
+        }
         let near = actual
             .edges
             .iter()
