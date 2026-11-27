@@ -1188,7 +1188,8 @@ pub fn replay(output: &mut PcgOutput<'_, '_>) -> Value {
     };
     // The full nodes on each edge of the control-flow graph, after the
     // edge's actions.
-    let mut on_edge: BTreeMap<(BasicBlock, BasicBlock), HashSet<Node<'_>>> = BTreeMap::new();
+    let mut on_edge: BTreeMap<(BasicBlock, BasicBlock), (HashSet<Node<'_>>, HashSet<Node<'_>>)> =
+        BTreeMap::new();
     let rpo = body.basic_blocks.reverse_postorder().to_vec();
     // The places without a value on entry to each block, for the comparison
     // on the edges into it.
@@ -1217,12 +1218,25 @@ pub fn replay(output: &mut PcgOutput<'_, '_>) -> Value {
             .map(|p| on_edge.get(&(*p, block)))
             .collect::<Vec<_>>();
         let full = match incoming.first() {
-            Some(Some(first)) if incoming.iter().all(|s| *s == Some(*first)) => (*first).clone(),
+            Some(Some((first, _)))
+                if incoming
+                    .iter()
+                    .all(|s| s.is_some_and(|(full, _)| full == first)) =>
+            {
+                first.clone()
+            }
             _ => entry.leaves(&|n| replay.is_tracked(n)),
         };
+        // The nodes that gave to a future node on some path into the block.
+        let gave_to_future = incoming
+            .iter()
+            .flatten()
+            .flat_map(|(_, gave)| gave.iter().copied())
+            .collect();
         let mut state = State {
             graph: entry,
             full,
+            gave_to_future,
             ..State::default()
         };
         for (index, stmt) in pcg_block.statements.iter().enumerate() {
@@ -1284,7 +1298,7 @@ pub fn replay(output: &mut PcgOutput<'_, '_>) -> Value {
             if replay.compare(&mut state, &actual, None, "edge") {
                 replay.report.edges_matched += 1;
             }
-            on_edge.insert((block, succ.block()), state.full);
+            on_edge.insert((block, succ.block()), (state.full, state.gave_to_future));
         }
     }
     replay.report_json(function)
