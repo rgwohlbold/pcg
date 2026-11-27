@@ -42,9 +42,12 @@
 //!    its targets. An `outlives` edge whose source is still blocked by another
 //!    edge gives nothing back: the other edge (e.g. a mutable borrow) returns
 //!    the contents.
-//! 5. **A node that enters the graph** with no edge into it, unlabelled, not
-//!    a future node and in an edge other than a future edge, is created full
-//!    (e.g. the result of a call that borrows from nothing in the graph).
+//! 5. **A node that enters the graph** holds the contents it held as part of
+//!    its place: a lifetime projection that an added edge (not a future edge)
+//!    brings in as a source is full before the edge's transfer. Another node
+//!    that enters the graph with no edge into it, unlabelled, not a future
+//!    node and in an edge other than a future edge, is created full (e.g. the
+//!    result of a call that borrows from nothing in the graph).
 //! 6. A full lifetime projection with a dereference edge into a place is
 //!    emptied.
 //! 7. At the end of a phase, the current lifetime projections of a place
@@ -433,6 +436,18 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
             BorrowPcgActionKind::Weaken(_) => {}
             BorrowPcgActionKind::AddEdge { edge } => {
                 let edge = Edge::new(edge.kind(), self.ctxt);
+                // A lifetime projection outside the graph holds its contents
+                // as part of its place; an edge that brings it in as a source
+                // brings them along (rule 5).
+                if !edge.class.is_future() {
+                    for s in &edge.sources {
+                        if is_tracked(*s) && !is_future(*s) && !before.contains(s) {
+                            state.full.insert(*s);
+                        }
+                    }
+                }
+                // The sources are not created full again after the transfer.
+                renamed_to.extend(edge.sources.iter().copied());
                 state.graph.edges.insert(edge.clone());
                 self.on_add(state, &edge);
             }
