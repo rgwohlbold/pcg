@@ -13,6 +13,9 @@
 //! - a lifetime projection that appears in an edge of the borrow graph,
 //! - that is not a future node and not a node of the caller,
 //! - whose base is not a place without a value (with only write capability),
+//! - that is not a current projection that is only the source of future
+//!   edges, with no edge into it (it stands for the value its place gets
+//!   next),
 //! - and that is not blocked by an edge into a non-future node.
 //!
 //! A leaf that is not full is *missing* (nothing gave it contents) and a full
@@ -492,13 +495,29 @@ impl<'tcx> Graph<'tcx> {
             .any(|e| !e.class.is_future() && e.nodes().any(|m| m == n))
     }
 
+    /// Whether the node is a current lifetime projection that is only the
+    /// source of future edges, with no edge into it: it stands for the value its place gets next, e.g. the projection
+    /// of a dropped place that a write gives a new value, which the future
+    /// node of the place's parent takes when it becomes current.
+    fn is_placeholder(&self, n: Node<'tcx>) -> bool {
+        matches!(n, PcgNode::LifetimeProjection(lp) if lp.label().is_none())
+            && !has_labelled_base(n)
+            && self.edges.iter().all(|e| {
+                !e.targets.contains(&n) && (e.class.is_future() || !e.sources.contains(&n))
+            })
+    }
+
     /// The nodes that hold their contents according to the graph's shape.
     fn leaves(&self, tracked: &impl Fn(Node<'tcx>) -> bool) -> HashSet<Node<'tcx>> {
         let blocked = self.blocked();
         self.nodes()
             .into_iter()
             .filter(|n| {
-                tracked(*n) && !is_future(*n) && !blocked.contains(n) && !self.has_no_value(*n)
+                tracked(*n)
+                    && !is_future(*n)
+                    && !blocked.contains(n)
+                    && !self.has_no_value(*n)
+                    && !self.is_placeholder(*n)
             })
             .collect()
     }
