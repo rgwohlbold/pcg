@@ -526,6 +526,9 @@ struct State<'tcx> {
     gave_to_future: HashSet<Node<'tcx>>,
     /// The call outputs already reported for rule 8.
     reported_outputs: HashSet<Node<'tcx>>,
+    /// Full nodes that the graph's shape says are blocked, reported once:
+    /// a client following the actions still holds their contents.
+    lost: HashSet<Node<'tcx>>,
 }
 
 /// Counters and findings of the replay of one function.
@@ -827,6 +830,9 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
             if state.gave_to_future.remove(from) {
                 state.gave_to_future.insert(*to);
             }
+            if state.lost.remove(from) {
+                state.lost.insert(*to);
+            }
         }
         state.full.extend(moved_full);
         renames.values().copied().collect()
@@ -1070,11 +1076,15 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
         });
         let start_leaves = start_leaves.as_ref();
         let nodes = actual.nodes();
+        // A lost predicate that is still blocked was reported already.
+        state
+            .lost
+            .retain(|n| state.full.contains(n) && nodes.contains(n) && !leaves.contains(n));
         let in_graph = state
             .full
             .iter()
             .copied()
-            .filter(|n| nodes.contains(n))
+            .filter(|n| nodes.contains(n) && !state.lost.contains(n))
             .collect::<HashSet<_>>();
         if start_leaves.is_some_and(|s| *s == leaves) && in_graph == leaves {
             return true;
@@ -1151,9 +1161,12 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
             "extra": extra_tags,
             "edges": near,
         }));
-        // Resynchronise, so that one mismatch does not cause later ones.
-        state.full.retain(|n| !nodes.contains(n));
-        state.full.extend(leaves);
+        // Resynchronise, so that one mismatch does not cause later ones: the
+        // missing leaves are taken as full, and the lost predicates stay full
+        // (a client following the actions still holds them) and are not
+        // reported again while they stay blocked.
+        state.full.extend(missing);
+        state.lost.extend(extra);
         false
     }
 
@@ -1232,8 +1245,11 @@ pub fn replay<'tcx>(output: &mut PcgOutput<'_, 'tcx>) -> Value {
     };
     // The full nodes on each edge of the control-flow graph, after the
     // edge's actions.
-    let mut on_edge: BTreeMap<(BasicBlock, BasicBlock), (HashSet<Node<'_>>, HashSet<Node<'_>>)> =
-        BTreeMap::new();
+    #[allow(clippy::type_complexity)]
+    let mut on_edge: BTreeMap<
+        (BasicBlock, BasicBlock),
+        (HashSet<Node<'_>>, HashSet<Node<'_>>, HashSet<Node<'_>>),
+    > = BTreeMap::new();
     let rpo = body.basic_blocks.reverse_postorder().to_vec();
     let loop_heads = rpo
         .iter()
@@ -1266,26 +1282,27 @@ pub fn replay<'tcx>(output: &mut PcgOutput<'_, 'tcx>) -> Value {
             .iter()
             .map(|p| on_edge.get(&(*p, block)))
             .collect::<Vec<_>>();
-        let full = match incoming.first() {
-            Some(Some((first, _)))
+        let (full, lost) = match incoming.first() {
+            Some(Some((first, _, lost)))
                 if incoming
                     .iter()
-                    .all(|s| s.is_some_and(|(full, _)| full == first)) =>
+                    .all(|s| s.is_some_and(|(full, _, _)| full == first)) =>
             {
-                first.clone()
+                (first.clone(), lost.clone())
             }
-            _ => entry.leaves(&|n| replay.is_tracked(n)),
+            _ => (entry.leaves(&|n| replay.is_tracked(n)), HashSet::default()),
         };
         // The nodes that gave to a future node on some path into the block.
         let gave_to_future = incoming
             .iter()
             .flatten()
-            .flat_map(|(_, gave)| gave.iter().copied())
+            .flat_map(|(_, gave, _)| gave.iter().copied())
             .collect();
         let mut state = State {
             graph: entry,
             full,
             gave_to_future,
+            lost,
             ..State::default()
         };
         for (index, stmt) in pcg_block.statements.iter().enumerate() {
@@ -1352,6 +1369,7 @@ pub fn replay<'tcx>(output: &mut PcgOutput<'_, 'tcx>) -> Value {
                     let strip = |n: Node<'tcx>| strip_loop_labels(n, succ.block(), ctxt);
                     state.full = state.full.iter().map(|n| strip(*n)).collect();
                     state.gave_to_future = state.gave_to_future.iter().map(|n| strip(*n)).collect();
+                    state.lost = state.lost.iter().map(|n| strip(*n)).collect();
                     let mut actual = actual;
                     actual.edges = actual
                         .edges
@@ -1370,7 +1388,10 @@ pub fn replay<'tcx>(output: &mut PcgOutput<'_, 'tcx>) -> Value {
             if replay.compare(&mut state, &actual, None, "edge") {
                 replay.report.edges_matched += 1;
             }
-            on_edge.insert((block, succ.block()), (state.full, state.gave_to_future));
+            on_edge.insert(
+                (block, succ.block()),
+                (state.full, state.gave_to_future, state.lost),
+            );
         }
     }
     replay.report_json(function)
