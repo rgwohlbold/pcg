@@ -86,7 +86,8 @@ use crate::{
         visitor::{GeneralizedLifetime, OpaqueTy},
     },
     pcg::{
-        CapabilityKind, EvalStmtPhase, Pcg, PcgNode, place_capabilities::PlaceCapabilitiesReader,
+        CapabilityKind, EvalStmtPhase, MaybeHasLocation, Pcg, PcgNode,
+        place_capabilities::PlaceCapabilitiesReader,
     },
     rustc_interface::{
         hir::def_id::DefId,
@@ -96,7 +97,7 @@ use crate::{
         },
     },
     utils::{
-        CompilerCtxt, Place,
+        CompilerCtxt, Place, SnapshotLocation,
         display::DisplayWithCtxt,
         place::{maybe_old::MaybeLabelledPlace, maybe_remote::MaybeRemotePlace},
     },
@@ -306,6 +307,41 @@ fn mutable_occurrence<'tcx>(
         | ty::TyKind::FnPtr(..) => false,
         // Aliases, trait objects and the rest: conservatively.
         _ => true,
+    }
+}
+
+/// `n` without the labels of `loop_head`'s join and of the loop head itself.
+fn strip_loop_labels<'tcx>(
+    n: Node<'tcx>,
+    loop_head: BasicBlock,
+    ctxt: CompilerCtxt<'_, 'tcx>,
+) -> Node<'tcx> {
+    let at_head = |location: Option<SnapshotLocation>| {
+        matches!(
+            location,
+            Some(SnapshotLocation::BeforeJoin(b) | SnapshotLocation::Loop(b)) if b == loop_head
+        )
+    };
+    let unlabel = |p: MaybeLabelledPlace<'tcx>| {
+        if at_head(p.location()) {
+            MaybeLabelledPlace::Current(p.place())
+        } else {
+            p
+        }
+    };
+    match n {
+        PcgNode::Place(p) => PcgNode::Place(unlabel(p)),
+        PcgNode::LifetimeProjection(mut lp) => {
+            if let PlaceOrConst::Place(MaybeRemotePlace::Local(p)) = lp.base {
+                lp.base = PlaceOrConst::Place(MaybeRemotePlace::Local(unlabel(p)));
+            }
+            if let Some(LifetimeProjectionLabel::Location(location)) = lp.label()
+                && at_head(Some(location))
+            {
+                lp = lp.with_label(None, ctxt);
+            }
+            PcgNode::LifetimeProjection(lp)
+        }
     }
 }
 
@@ -1093,6 +1129,9 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
             for e in &actual.edges {
                 tracing::debug!(target: "pcg::holders", "  mismatch graph: {}", e.display(self.ctxt));
             }
+            for n in &state.full {
+                tracing::debug!(target: "pcg::holders", "  mismatch full: {}", self.show(*n));
+            }
         }
         let near = actual
             .edges
@@ -1179,7 +1218,7 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
 
 /// Replays the actions of the PCG of a function and compares the holders of
 /// contents with the leaves of the graph; see the module documentation.
-pub fn replay(output: &mut PcgOutput<'_, '_>) -> Value {
+pub fn replay<'tcx>(output: &mut PcgOutput<'_, 'tcx>) -> Value {
     let ctxt = output.ctxt();
     let body = ctxt.body();
     let function = ctxt.body_def_path_str();
@@ -1196,6 +1235,11 @@ pub fn replay(output: &mut PcgOutput<'_, '_>) -> Value {
     let mut on_edge: BTreeMap<(BasicBlock, BasicBlock), (HashSet<Node<'_>>, HashSet<Node<'_>>)> =
         BTreeMap::new();
     let rpo = body.basic_blocks.reverse_postorder().to_vec();
+    let loop_heads = rpo
+        .iter()
+        .copied()
+        .filter(|b| output.analysis().loop_analysis().loop_head_of(*b).is_some())
+        .collect::<BTreeSet<_>>();
     // The places without a value on entry to each block, for the comparison
     // on the edges into it.
     let mut entry_without_value = BTreeMap::new();
@@ -1299,6 +1343,29 @@ pub fn replay(output: &mut PcgOutput<'_, '_>) -> Value {
                 succ.block(),
                 ctxt,
             );
+            // On an edge entering a loop head from outside the loop, a node
+            // labelled before the join or at the loop head stands for its
+            // place's value in the same state as the current node: the value
+            // at the loop head, when the loop is entered.
+            let (mut state, actual) =
+                if loop_heads.contains(&succ.block()) && !ctxt.is_back_edge(block, succ.block()) {
+                    let strip = |n: Node<'tcx>| strip_loop_labels(n, succ.block(), ctxt);
+                    state.full = state.full.iter().map(|n| strip(*n)).collect();
+                    state.gave_to_future = state.gave_to_future.iter().map(|n| strip(*n)).collect();
+                    let mut actual = actual;
+                    actual.edges = actual
+                        .edges
+                        .iter()
+                        .map(|e| Edge {
+                            class: e.class,
+                            sources: e.sources.iter().map(|n| strip(*n)).collect(),
+                            targets: e.targets.iter().map(|n| strip(*n)).collect(),
+                        })
+                        .collect();
+                    (state, actual)
+                } else {
+                    (state, actual)
+                };
             replay.report.edges_checked += 1;
             if replay.compare(&mut state, &actual, None, "edge") {
                 replay.report.edges_matched += 1;
