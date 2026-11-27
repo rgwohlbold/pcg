@@ -12,6 +12,7 @@
 //!
 //! - a lifetime projection that appears in an edge of the borrow graph,
 //! - that is not a future node and not a node of the caller,
+//! - whose base is not a place without a value (with only write capability),
 //! - and that is not blocked by an edge into a non-future node.
 //!
 //! A leaf that is not full is *missing* (nothing gave it contents) and a full
@@ -46,6 +47,10 @@
 //!    (e.g. the result of a call that borrows from nothing in the graph).
 //! 6. A full lifetime projection with a dereference edge into a place is
 //!    emptied.
+//! 7. At the end of a phase, the current lifetime projections of a place
+//!    without a value are emptied: what they held left with the value (e.g.
+//!    the result's contents, which go to the caller at the return). This rule
+//!    reads the PCG's capabilities; each use is reported.
 //!
 //! The replay is enabled in `pcg_bin` with `PCG_HOLDERS_REPLAY=<file>`; it
 //! appends one JSON line per function to the file.
@@ -69,12 +74,27 @@ use crate::{
         graph::BorrowsGraph,
         region_projection::{LifetimeProjectionLabel, PlaceOrConst},
     },
-    pcg::{EvalStmtPhase, PcgNode},
+    pcg::{
+        CapabilityKind, EvalStmtPhase, Pcg, PcgNode, place_capabilities::PlaceCapabilitiesReader,
+    },
     rustc_interface::middle::mir::{self, BasicBlock},
-    utils::{CompilerCtxt, display::DisplayWithCtxt, place::maybe_remote::MaybeRemotePlace},
+    utils::{
+        CompilerCtxt, Place,
+        display::DisplayWithCtxt,
+        place::{maybe_old::MaybeLabelledPlace, maybe_remote::MaybeRemotePlace},
+    },
 };
 
 type Node<'tcx> = PcgNode<'tcx>;
+
+/// The places that hold only write capability in `pcg`.
+fn without_value<'tcx>(pcg: &Pcg<'_, 'tcx>) -> HashSet<Place<'tcx>> {
+    pcg.capabilities()
+        .iter()
+        .filter(|(_, capability)| *capability == CapabilityKind::Write)
+        .map(|(place, _)| place)
+        .collect()
+}
 
 /// The kind of an edge, as far as the replay distinguishes them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -266,13 +286,38 @@ fn is_labelled(n: Node<'_>) -> bool {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Graph<'tcx> {
     edges: HashSet<Edge<'tcx>>,
+    /// The places that hold no value (only write capability) in the state of
+    /// the graph: their lifetime projections hold nothing.
+    without_value: HashSet<Place<'tcx>>,
 }
 
 impl<'tcx> Graph<'tcx> {
-    fn of(graph: &BorrowsGraph<'tcx>, ctxt: CompilerCtxt<'_, 'tcx>) -> Self {
+    fn of(
+        graph: &BorrowsGraph<'tcx>,
+        without_value: HashSet<Place<'tcx>>,
+        ctxt: CompilerCtxt<'_, 'tcx>,
+    ) -> Self {
         Graph {
             edges: graph.edges().map(|e| Edge::new(e.kind(), ctxt)).collect(),
+            without_value,
         }
+    }
+
+    fn of_state(pcg: &Pcg<'_, 'tcx>, ctxt: CompilerCtxt<'_, 'tcx>) -> Self {
+        Self::of(pcg.borrow_pcg().graph(), without_value(pcg), ctxt)
+    }
+
+    /// Whether the node is a lifetime projection of a place without a value.
+    fn has_no_value(&self, n: Node<'tcx>) -> bool {
+        matches!(
+            n,
+            PcgNode::LifetimeProjection(lp)
+                if matches!(
+                    lp.base,
+                    PlaceOrConst::Place(MaybeRemotePlace::Local(MaybeLabelledPlace::Current(p)))
+                        if self.without_value.contains(&p)
+                )
+        )
     }
 
     fn nodes(&self) -> HashSet<Node<'tcx>> {
@@ -303,7 +348,9 @@ impl<'tcx> Graph<'tcx> {
         let blocked = self.blocked();
         self.nodes()
             .into_iter()
-            .filter(|n| is_tracked(*n) && !is_future(*n) && !blocked.contains(n))
+            .filter(|n| {
+                is_tracked(*n) && !is_future(*n) && !blocked.contains(n) && !self.has_no_value(*n)
+            })
             .collect()
     }
 
@@ -335,6 +382,9 @@ struct Report {
     mismatches: Vec<Value>,
     /// Removals of edges that the replay's graph does not have.
     unknown_removals: Vec<Value>,
+    /// Full nodes emptied at the end of a phase because their place has no
+    /// value (rule 7).
+    dropped_with_value: Vec<Value>,
 }
 
 struct Replay<'a, 'tcx> {
@@ -702,6 +752,31 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
         start_leaves: Option<&HashSet<Node<'tcx>>>,
         phase: &str,
     ) -> bool {
+        // Rule 7: a place without a value holds nothing in its lifetime
+        // projections; what they held left with the value (e.g. the result's
+        // to the caller at the return).
+        let dropped = state
+            .full
+            .iter()
+            .copied()
+            .filter(|n| actual.has_no_value(*n))
+            .collect::<Vec<_>>();
+        if !dropped.is_empty() {
+            for n in &dropped {
+                state.full.remove(n);
+            }
+            let dropped = dropped;
+            self.report.dropped_with_value.push(json!({
+                "at": self.at,
+                "phase": phase,
+                "stmt": self.stmt,
+                "stmt_kind": self.stmt_kind,
+                "nodes": self.show_set(dropped.iter().copied()),
+                "in_graph": self.show_set(
+                    dropped.iter().copied().filter(|n| actual.nodes().contains(n))
+                ),
+            }));
+        }
         let leaves = actual.leaves();
         let nodes = actual.nodes();
         let in_graph = state
@@ -828,6 +903,7 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
             "rule_p_failures": r.rule_p_failures,
             "mismatches": r.mismatches,
             "unknown_removals": r.unknown_removals,
+            "dropped_with_value": r.dropped_with_value,
         })
     }
 }
@@ -849,6 +925,16 @@ pub fn replay(output: &mut PcgOutput<'_, '_>) -> Value {
     // edge's actions.
     let mut on_edge: BTreeMap<(BasicBlock, BasicBlock), HashSet<Node<'_>>> = BTreeMap::new();
     let rpo = body.basic_blocks.reverse_postorder().to_vec();
+    // The places without a value on entry to each block, for the comparison
+    // on the edges into it.
+    let mut entry_without_value = BTreeMap::new();
+    for block in &rpo {
+        if let Ok(Some(pcg_block)) = output.get_all_for_bb(*block)
+            && let Some(first) = pcg_block.statements.first()
+        {
+            entry_without_value.insert(*block, without_value(&first.entry_state));
+        }
+    }
     for block in rpo {
         let Ok(Some(pcg_block)) = output.get_all_for_bb(block) else {
             continue;
@@ -856,7 +942,7 @@ pub fn replay(output: &mut PcgOutput<'_, '_>) -> Value {
         let Some(first) = pcg_block.statements.first() else {
             continue;
         };
-        let entry = Graph::of(first.entry_state.borrow_pcg().graph(), ctxt);
+        let entry = Graph::of_state(&first.entry_state, ctxt);
         // A block starts with the full nodes of the edges into it if they all
         // agree (and none is a back edge not replayed yet), and with the
         // leaves of its graph otherwise.
@@ -882,10 +968,10 @@ pub fn replay(output: &mut PcgOutput<'_, '_>) -> Value {
                 state.gave.clear();
                 // Each phase starts from the PCG's state before it; within the
                 // phase, the graph changes only by the phase's actions.
-                state.graph = Graph::of(
+                state.graph = Graph::of_state(
                     match phase.prev() {
-                        None => stmt.entry_state.borrow_pcg().graph(),
-                        Some(prev) => stmt.states[prev].borrow_pcg().graph(),
+                        None => &stmt.entry_state,
+                        Some(prev) => &stmt.states[prev],
                     },
                     ctxt,
                 );
@@ -893,15 +979,12 @@ pub fn replay(output: &mut PcgOutput<'_, '_>) -> Value {
                 for action in stmt.actions(phase).iter() {
                     replay.apply_action(&mut state, action);
                 }
-                let actual = Graph::of(stmt.states[phase].borrow_pcg().graph(), ctxt);
+                let actual = Graph::of_state(&stmt.states[phase], ctxt);
                 replay.compare(&mut state, &actual, Some(&start_leaves), &phase.to_string());
             }
         }
         if let Some(last) = pcg_block.statements.last() {
-            state.graph = Graph::of(
-                last.states[EvalStmtPhase::last()].borrow_pcg().graph(),
-                ctxt,
-            );
+            state.graph = Graph::of_state(&last.states[EvalStmtPhase::last()], ctxt);
         }
         replay.at = format!("{block:?}[term]");
         for succ in &pcg_block.terminator.succs {
@@ -912,7 +995,14 @@ pub fn replay(output: &mut PcgOutput<'_, '_>) -> Value {
             for action in succ.actions().iter() {
                 replay.apply_action(&mut state, action);
             }
-            let actual = Graph::of(succ.entry_graph(), ctxt);
+            let actual = Graph::of(
+                succ.entry_graph(),
+                entry_without_value
+                    .get(&succ.block())
+                    .cloned()
+                    .unwrap_or_default(),
+                ctxt,
+            );
             replay.report.edges_checked += 1;
             if replay.compare(&mut state, &actual, None, "edge") {
                 replay.report.edges_matched += 1;
