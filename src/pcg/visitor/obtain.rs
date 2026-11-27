@@ -327,6 +327,33 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
             self.unlabel_blocked_region_projections_if_applicable(&edge.value, context)?;
         }
         if let Some(deref_place) = deref_place.as_current_place() {
+            // The expansions of lifetime projections into those of the
+            // dereferenced place that nothing blocks end with it: their
+            // contents go back to the projection expanded, rather than staying
+            // in the labelled versions.
+            let expansions = {
+                let fg = self.pcg.borrow.graph.frozen_graph();
+                self.pcg
+                    .borrow
+                    .graph
+                    .edges()
+                    .filter(|edge| {
+                        matches!(
+                            edge.kind(),
+                            BorrowPcgEdgeKind::BorrowPcgExpansion(
+                                BorrowPcgExpansion::LifetimeProjection(expansion)
+                            ) if expansion.expansion.iter().all(|node| {
+                                node.base.as_current_place() == Some(deref_place)
+                                    && !fg.has_edge_blocking((*node).into(), self.ctxt)
+                            })
+                        )
+                    })
+                    .map(BorrowPcgEdgeLike::to_owned_edge)
+                    .collect::<Vec<_>>()
+            };
+            for edge in expansions {
+                self.remove_edge_and_perform_associated_state_updates(&edge, context)?;
+            }
             self.apply_action(
                 BorrowPcgAction::label_place_and_update_related_capabilities(
                     deref_place,
