@@ -212,6 +212,16 @@ pub(crate) fn run_pcg_on_fn<'tcx>(
         emit_borrowcheck_graphs(&dir_path, ctxt);
     }
 
+    if let Some(path) = &pcg_ctxt.settings().holders_replay {
+        let report = pcg::holders::replay(&mut output);
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap_or_else(|e| panic!("Failed to open {path}: {e}"));
+        writeln!(file, "{report}").unwrap();
+    }
+
     emit_and_check_annotations(
         pcg_ctxt.ctxt().body_def_path_str(),
         pcg_ctxt.settings(),

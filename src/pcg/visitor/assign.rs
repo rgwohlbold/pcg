@@ -190,7 +190,7 @@ impl<'a, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>> PcgVisitor<'_, 'a, 'tcx, Ctxt> 
                 if matches!(kind, mir::BorrowKind::Fake(_)) {
                     return Ok(());
                 }
-                self.pcg.borrow.add_borrow(
+                let borrow_edge = self.pcg.borrow.add_borrow(
                     blocked_place,
                     target,
                     *kind,
@@ -199,6 +199,11 @@ impl<'a, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>> PcgVisitor<'_, 'a, 'tcx, Ctxt> 
                     &mut self.pcg.place_capabilities,
                     self.ctxt,
                 );
+                // The borrow is an action like the other edges of the
+                // statement, so that a client sees every change of the graph.
+                self.record_and_apply_action(
+                    BorrowPcgAction::add_edge(borrow_edge, "assign_post_main").into(),
+                )?;
                 self.label_lifetime_projections_for_borrow(blocked_place, target, *kind)?;
             }
             Rvalue::RawPtr(kind, p) if !kind.is_fake() => {

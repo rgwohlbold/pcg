@@ -37,6 +37,7 @@ pub mod borrow_checker;
 pub mod borrow_pcg;
 pub mod coupling;
 pub mod error;
+pub mod holders;
 pub mod r#loop;
 pub mod owned_pcg;
 use std::{

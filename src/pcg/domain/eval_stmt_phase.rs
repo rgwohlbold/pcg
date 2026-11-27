@@ -46,6 +46,16 @@ impl EvalStmtPhase {
         ]
     }
 
+    #[must_use]
+    pub fn prev(self) -> Option<EvalStmtPhase> {
+        match self {
+            EvalStmtPhase::PreOperands => None,
+            EvalStmtPhase::PostOperands => Some(EvalStmtPhase::PreOperands),
+            EvalStmtPhase::PreMain => Some(EvalStmtPhase::PostOperands),
+            EvalStmtPhase::PostMain => Some(EvalStmtPhase::PreMain),
+        }
+    }
+
     pub(crate) fn next(self) -> Option<EvalStmtPhase> {
         match self {
             EvalStmtPhase::PreOperands => Some(EvalStmtPhase::PostOperands),

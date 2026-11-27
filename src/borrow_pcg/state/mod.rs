@@ -544,7 +544,8 @@ impl<'a, 'tcx> BorrowsState<'a, 'tcx> {
         region: ty::Region<'tcx>,
         capabilities: &mut PlaceCapabilities<'tcx>,
         ctxt: Ctxt,
-    ) where
+    ) -> BorrowPcgEdge<'tcx>
+    where
         'tcx: 'a,
     {
         assert!(
@@ -563,13 +564,10 @@ impl<'a, 'tcx> BorrowsState<'a, 'tcx> {
             region,
             ctxt,
         );
-        assert!(self.graph.insert(
-            BorrowPcgEdge::new(
-                BorrowPcgEdgeKind::Borrow(borrow_edge),
-                self.validity_conditions.clone(),
-            ),
-            ctxt.ctxt()
-        ));
+        let borrow_edge = BorrowPcgEdge::new(
+            BorrowPcgEdgeKind::Borrow(borrow_edge),
+            self.validity_conditions.clone(),
+        );
 
         if let BorrowKind::Mut {
             kind: MutBorrowKind::Default | MutBorrowKind::ClosureCapture,
@@ -598,6 +596,7 @@ impl<'a, 'tcx> BorrowsState<'a, 'tcx> {
                 }
             }
         }
+        borrow_edge
     }
 }
 

@@ -129,6 +129,9 @@ pub struct PcgSettings {
     /// Whether an expansion labels every lifetime projection of its base, not
     /// only those that the obtain may change (see `lifetimes_changed_through`).
     pub label_all_lifetime_projections: bool,
+    /// The file to which a client appends the report of
+    /// [`crate::holders::replay`] for each function, if any.
+    pub holders_replay: Option<String>,
 }
 
 impl Default for PcgSettings {
@@ -201,6 +204,8 @@ impl PcgSettings {
             false,
         );
 
+        let holders_replay = Self::process_string_var(&mut processed_vars, "PCG_HOLDERS_REPLAY");
+
         // Check for unknown PCG_ environment variables
         Self::check_for_unknown_vars(&processed_vars);
 
@@ -222,6 +227,7 @@ impl PcgSettings {
             coupling,
             pack_strategy,
             label_all_lifetime_projections,
+            holders_replay,
         }
     }
 
