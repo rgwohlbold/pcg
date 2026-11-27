@@ -1,3 +1,4 @@
+use crate::{borrow_pcg::edge_data::EdgeData as _, pcg::PcgNode};
 use std::borrow::Cow;
 
 use crate::{
@@ -431,8 +432,11 @@ impl<'a, 'tcx: 'a> Pcg<'a, 'tcx> {
         if ctxt.is_loop_head(other_block) {
             // A back edge removes the views that the iteration added and the
             // loop head does not have, before replaying the head's expansions.
-            if ctxt.bc_ctxt().is_back_edge(self_block, other_block) {
+            let is_back_edge = ctxt.bc_ctxt().is_back_edge(self_block, other_block);
+            let mut removed_views = Vec::new();
+            if is_back_edge {
                 for edge in slf.extra_lifetime_projection_views(target.borrow.graph(), ctxt) {
+                    removed_views.push(edge.kind().clone());
                     actions.push(
                         BorrowPcgAction::remove_edge(
                             edge,
@@ -443,6 +447,21 @@ impl<'a, 'tcx: 'a> Pcg<'a, 'tcx> {
                 }
             }
             actions.extend(slf.bridge_loop_expansions(target, self_block, other_block, ctxt)?);
+            // The other edges of the iteration that the loop head does not
+            // have end on the back edge, leaves first, so that the actions
+            // lead to the loop head's graph: e.g. what a borrow that lasts
+            // until the end of the iteration holds is given back.
+            if is_back_edge {
+                for edge in slf.extra_edges(target.borrow.graph(), &removed_views, ctxt) {
+                    actions.push(
+                        BorrowPcgAction::remove_edge(
+                            edge,
+                            "bridge: an edge the loop head does not have",
+                        )
+                        .into(),
+                    );
+                }
+            }
         } else {
             for kind in slf.missing_lifetime_projection_views(target.borrow.graph(), ctxt) {
                 actions.push(
@@ -455,6 +474,42 @@ impl<'a, 'tcx: 'a> Pcg<'a, 'tcx> {
             }
         }
         Ok(actions)
+    }
+
+    /// The edges of `self` that `graph` lacks, other than `removed`, in an
+    /// order in which each can be removed: an edge only once no remaining
+    /// edge blocks its targets. An edge whose targets an edge that `graph`
+    /// has blocks is kept.
+    pub(crate) fn extra_edges(
+        &self,
+        graph: &BorrowsGraph<'tcx>,
+        removed: &[BorrowPcgEdgeKind<'tcx>],
+        ctxt: impl DataflowCtxt<'a, 'tcx>,
+    ) -> Vec<BorrowPcgEdge<'tcx>> {
+        let own = self.borrow.graph();
+        let mut remaining = own
+            .edges()
+            .filter(|edge| !removed.contains(edge.kind()))
+            .map(|edge| BorrowPcgEdge::new(edge.kind().clone(), edge.conditions.clone()))
+            .collect::<Vec<_>>();
+        let in_target = |kind: &BorrowPcgEdgeKind<'tcx>| graph.edges().any(|e| e.kind() == kind);
+        let mut result = Vec::new();
+        loop {
+            let leaf = remaining.iter().position(|edge| {
+                !in_target(edge.kind())
+                    && edge.kind().blocked_by_nodes(ctxt.bc_ctxt()).all(|target| {
+                        let target: PcgNode<'tcx> = target.into();
+                        !remaining
+                            .iter()
+                            .any(|other| other.kind().blocks_node(target, ctxt.bc_ctxt()))
+                    })
+            });
+            let Some(index) = leaf else {
+                break;
+            };
+            result.push(remaining.remove(index));
+        }
+        result
     }
 
     /// The views in `self` (see `missing_lifetime_projection_views`) that
