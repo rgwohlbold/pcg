@@ -214,19 +214,12 @@ impl<P: Copy> LabelNodePredicate<'_, P> {
         Self::Not(Box::new(self))
     }
 
-    /// Matches future edges from the targets of an expansion or a borrow into
-    /// a future node.
-    pub(crate) fn from_expansion_or_borrow_edge() -> Self {
-        Self::Or(
-            [FutureEdgeKind::FromExpansion, FutureEdgeKind::FromBorrow]
-                .into_iter()
-                .map(|kind| {
-                    Self::EdgeType(BorrowPcgEdgeType::BorrowFlow {
-                        future_edge_kind: Some(kind),
-                    })
-                })
-                .collect(),
-        )
+    /// Applies to nodes of future edges from an expansion: the future of a
+    /// place is made of the future contents of its parts.
+    pub(crate) fn from_expansion_edge() -> Self {
+        Self::EdgeType(BorrowPcgEdgeType::BorrowFlow {
+            future_edge_kind: Some(FutureEdgeKind::FromExpansion),
+        })
     }
 }
 

@@ -677,8 +677,8 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
         }
     }
 
-    /// The future edges from an expansion or a borrow whose source is a
-    /// lifetime projection of the current `place`.
+    /// The future edges from an expansion whose source is a lifetime
+    /// projection of the current `place`.
     fn future_edges_from_current(&self, place: Place<'tcx>) -> Vec<BorrowPcgEdge<'tcx>> {
         self.pcg
             .borrow
@@ -688,8 +688,7 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
                 matches!(
                     edge.kind(),
                     BorrowPcgEdgeKind::BorrowFlow(flow)
-                        if (flow.kind.is_future_from_expansion()
-                            || flow.kind.is_future_from_borrow())
+                        if flow.kind.is_future_from_expansion()
                             && flow.long().base.as_current_place() == Some(place)
                 )
             })
@@ -1071,7 +1070,7 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
                         LabelNodePredicate::And(vec![
                             LabelNodePredicate::PlaceEquals(place),
                             LabelNodePredicate::InSourceNodes,
-                            LabelNodePredicate::from_expansion_or_borrow_edge(),
+                            LabelNodePredicate::from_expansion_edge(),
                         ]),
                         None,
                         "label place and update related capabilities",

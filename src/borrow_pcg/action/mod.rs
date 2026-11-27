@@ -212,12 +212,14 @@ impl LabelPlaceReason {
                 // the stuff that will reside in x'|a will be determined by the new contents of x.f|'a
                 // We don't want an edge like "x.f at bb2[6] |'a -> x|'a at FUTURE"
                 // A dead place gets no new contents: what flows into the
-                // future node comes from its value at the label.
+                // future node comes from its value at the label. Neither does
+                // the lender of a borrow whose borrower is overwritten: what
+                // it gets back comes from the overwritten value.
                 if self == LabelPlaceReason::Write {
                     LabelNodePredicate::not(LabelNodePredicate::And(vec![
                         LabelNodePredicate::PlaceEquals(place),
                         LabelNodePredicate::InSourceNodes,
-                        LabelNodePredicate::from_expansion_or_borrow_edge(),
+                        LabelNodePredicate::from_expansion_edge(),
                     ]))
                 } else {
                     LabelNodePredicate::And(vec![])
