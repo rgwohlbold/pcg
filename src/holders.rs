@@ -244,6 +244,19 @@ impl<'tcx> Edge<'tcx> {
         self.targets.iter().any(|t| !is_future(*t))
     }
 
+    /// Whether the edge is an `outlives` edge whose targets that are not
+    /// future nodes are all lifetime projections of the body that the replay
+    /// does not track: they cannot hold a mutable loan, so the edge (e.g. of
+    /// a shared reborrow) takes no contents from its sources.
+    fn only_into_untracked(&self, tracked: &impl Fn(Node<'tcx>) -> bool) -> bool {
+        matches!(self.class, EdgeClass::Outlives { .. })
+            && self
+                .targets
+                .iter()
+                .filter(|t| !is_future(**t))
+                .all(|t| !is_outside(*t) && !tracked(*t))
+    }
+
     fn display(&self, ctxt: CompilerCtxt<'_, 'tcx>) -> String {
         let show = |ns: &[Node<'tcx>]| {
             ns.iter()
@@ -377,8 +390,6 @@ fn is_outside(n: Node<'_>) -> bool {
     !is_lp(n) || is_remote(n) || is_const(n)
 }
 
-/// A lifetime projection whose contents the replay tracks.
-
 /// Whether the lifetime projection carries a label (other than the future
 /// label), or its base is a labelled place.
 fn is_labelled(n: Node<'_>) -> bool {
@@ -508,8 +519,15 @@ impl<'tcx> Graph<'tcx> {
     }
 
     /// The nodes that hold their contents according to the graph's shape.
+    /// An edge into lifetime projections that are all untracked (e.g. of a
+    /// shared reborrow) freezes its sources, which keep their contents.
     fn leaves(&self, tracked: &impl Fn(Node<'tcx>) -> bool) -> HashSet<Node<'tcx>> {
-        let blocked = self.blocked();
+        let blocked = self
+            .edges
+            .iter()
+            .filter(|e| e.blocks() && !e.only_into_untracked(tracked))
+            .flat_map(|e| e.sources.iter().copied())
+            .collect::<HashSet<_>>();
         self.nodes()
             .into_iter()
             .filter(|n| {
@@ -893,9 +911,13 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
             .into_iter()
             .filter(|t| self.is_tracked(*t))
             .collect::<Vec<_>>();
+        if edge.only_into_untracked(&|n| self.is_tracked(n)) {
+            // A shared reborrow freezes the sources, which keep what they
+            // hold.
+            return;
+        }
         if targets.is_empty() {
-            // A lifetime projection passes what it holds on to places (or
-            // to projections the replay does not track).
+            // A lifetime projection passes what it holds on to places.
             for s in full_sources {
                 state.full.remove(&s);
                 state.spent.insert(s);
