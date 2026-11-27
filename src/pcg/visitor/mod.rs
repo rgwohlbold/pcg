@@ -355,6 +355,20 @@ impl<'a, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>> FallableVisitor<'tcx>
         location: Location,
     ) -> Result<(), PcgError> {
         self.super_terminator_fallable(terminator, location)?;
+        // A dropped place has no value afterwards: it keeps only write
+        // capability, as the target of an assignment does before the write.
+        if self.phase() == EvalStmtPhase::PostMain
+            && let mir::TerminatorKind::Drop { place, .. } = &terminator.kind
+        {
+            let place: Place<'tcx> = (*place).into();
+            if let Some(cap) = self.pcg.capability_of(place, self.ctxt)
+                && cap > CapabilityKind::Write
+            {
+                self.record_and_apply_action(
+                    BorrowPcgAction::weaken(place, cap, Some(CapabilityKind::Write), "drop").into(),
+                )?;
+            }
+        }
         if self.phase() == EvalStmtPhase::PostMain
             && let mir::TerminatorKind::Call {
                 func,

@@ -485,10 +485,17 @@ impl<'pcg, 'a: 'pcg, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx> + DebugCtxt>
                 return ShouldKillNode::No;
             }
 
+            // A place with only write capability, e.g. the target of a
+            // reference after a drop of it, has no value to give back to its
+            // parent: it stays until it is written.
+            let without_value = place.as_current_place().is_some_and(|place| {
+                self.pcg.capability_of(place, ctxt) == Some(CapabilityKind::Write)
+            });
             if p.is_place()
                 && !place.place().projection.is_empty()
                 && !fg.has_edge_blocking(place.into(), ctxt)
                 && !place.place().contains_unsafe_deref(ctxt)
+                && !without_value
             {
                 return ShouldKillNode::Yes {
                     reason:

@@ -12,8 +12,10 @@ fn write_field_in_loop(mut pair: Pair) {
     // PCG: bb2[0] pre_operands: pair.fst: E
     // PCG: bb2[0] pre_operands: pair.snd: E
     // ~PCG: bb2[0] pre_operands: pair: E
-    // PCG: bb5[0] post_main: pair.fst: E
+    // The drop of `pair.fst` before the write leaves it without a value.
+    // PCG: bb5[0] post_main: pair.fst: W
     // PCG: bb5[0] post_main: pair.snd: E
+    // PCG: bb6[0] post_main: pair.fst: E
     // ~PCG: bb5[0] post_main: pair: E
     while !cond {
         pair.fst = String::new();
