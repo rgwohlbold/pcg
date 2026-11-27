@@ -6,7 +6,7 @@ use crate::{
     borrow_pcg::{
         self, GeneralizedLifetime,
         action::{ApplyActionResult, BorrowPcgActionKind, LabelPlaceReason},
-        borrow_pcg_edge::{BorrowPcgEdge, LocalNode},
+        borrow_pcg_edge::{BorrowPcgEdge, BorrowPcgEdgeLike, LocalNode},
         borrow_pcg_expansion::{BorrowPcgExpansion, PlaceExpansion},
         edge::{deref::DerefEdge, kind::BorrowPcgEdgeKind},
         edge_data::{EdgeData, LabelNodePredicate},
@@ -624,6 +624,26 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
         }
     }
 
+    /// The future edges from an expansion or a borrow whose source is a
+    /// lifetime projection of the current `place`.
+    fn future_edges_from_current(&self, place: Place<'tcx>) -> Vec<BorrowPcgEdge<'tcx>> {
+        self.pcg
+            .borrow
+            .graph()
+            .edges()
+            .filter(|edge| {
+                matches!(
+                    edge.kind(),
+                    BorrowPcgEdgeKind::BorrowFlow(flow)
+                        if (flow.kind.is_future_from_expansion()
+                            || flow.kind.is_future_from_borrow())
+                            && flow.long().base.as_current_place() == Some(place)
+                )
+            })
+            .map(BorrowPcgEdgeLike::to_owned_edge)
+            .collect()
+    }
+
     pub(crate) fn record_and_apply_action(
         &mut self,
         mut action: PcgAction<'tcx>,
@@ -632,6 +652,44 @@ impl<'state, 'a: 'state, 'tcx: 'a, Ctxt: DataflowCtxt<'a, 'tcx>>
         Ctxt: HasBorrowCheckerCtxt<'a, 'tcx> + HasSettings<'a>,
     {
         tracing::debug!("Applying Action: {}", action.debug_line(self.ctxt));
+        // Labelling a written or dead place does not label it where it is the
+        // source of a future edge from an expansion or a borrow: the edge
+        // then starts from the place's next value. So that the label renames
+        // the node everywhere it applies to, the action is surrounded by the
+        // removal of these edges and their addition with the current node.
+        if let PcgAction::Borrow(BorrowPcgAction {
+            kind: BorrowPcgActionKind::LabelPlace(label),
+            ..
+        }) = &action
+            && matches!(
+                label.reason,
+                LabelPlaceReason::Write | LabelPlaceReason::Dead
+            )
+        {
+            let kept = self.future_edges_from_current(label.place);
+            if !kept.is_empty() {
+                for edge in &kept {
+                    self.record_and_apply_action(
+                        BorrowPcgAction::remove_edge(
+                            edge.clone(),
+                            "the future edge starts from the next value of the labelled place",
+                        )
+                        .into(),
+                    )?;
+                }
+                self.record_and_apply_action(action)?;
+                for edge in kept {
+                    self.record_and_apply_action(
+                        BorrowPcgAction::add_edge(
+                            edge,
+                            "the future edge starts from the next value of the labelled place",
+                        )
+                        .into(),
+                    )?;
+                }
+                return Ok(());
+            }
+        }
         // Applying a label action records the nodes it renamed in it. A
         // regain records them in a label action following it.
         let mut regained_renames = None;

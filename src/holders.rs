@@ -28,8 +28,8 @@
 //!    sources and none is full, the node takes nothing: a *rule P failure*.
 //!    Without such sources, it takes the contents of its earlier version (the
 //!    source of a `ToFutureSelf` edge).
-//! 3. **An added edge** into a place empties its full lifetime-projection
-//!    sources (their contents leave the borrow graph). An added edge into
+//! 3. **An added edge** (other than a future edge) into a place empties its
+//!    full lifetime-projection sources (their contents leave the borrow graph). An added edge into
 //!    lifetime projections fills them if a source is full, was emptied by an
 //!    added edge earlier in the phase, is a place or a node of the caller, or
 //!    the edge is the assignment of a constant; it empties its full
@@ -41,9 +41,9 @@
 //!    its targets. An `outlives` edge whose source is still blocked by another
 //!    edge gives nothing back: the other edge (e.g. a mutable borrow) returns
 //!    the contents.
-//! 5. **A node that enters the graph** with no edge into it, unlabelled and not
-//!    a future node, is created full (e.g. the result of a call that borrows
-//!    from nothing in the graph).
+//! 5. **A node that enters the graph** with no edge into it, unlabelled, not
+//!    a future node and in an edge other than a future edge, is created full
+//!    (e.g. the result of a call that borrows from nothing in the graph).
 //! 6. A full lifetime projection with a dereference edge into a place is
 //!    emptied.
 //!
@@ -291,6 +291,13 @@ impl<'tcx> Graph<'tcx> {
         self.edges.iter().any(|e| e.targets.contains(&n))
     }
 
+    /// Whether the node appears in an edge that is not a future edge.
+    fn in_non_future_edge(&self, n: Node<'tcx>) -> bool {
+        self.edges
+            .iter()
+            .any(|e| !e.class.is_future() && e.nodes().any(|m| m == n))
+    }
+
     /// The nodes that hold their contents according to the graph's shape.
     fn leaves(&self) -> HashSet<Node<'tcx>> {
         let blocked = self.blocked();
@@ -408,6 +415,7 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
                 && !is_future(n)
                 && !is_labelled(n)
                 && !state.graph.has_incoming(n)
+                && state.graph.in_non_future_edge(n)
             {
                 state.full.insert(n);
             }
@@ -526,7 +534,9 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
     }
 
     fn on_add(&mut self, state: &mut State<'tcx>, edge: &Edge<'tcx>) {
-        if !edge.blocks() {
+        // A future edge records where contents will flow; adding one moves
+        // nothing, also when its target is already current.
+        if edge.class.is_future() || !edge.blocks() {
             return;
         }
         let targets = edge
@@ -550,9 +560,10 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
             return;
         }
         let feeds = edge.class == EdgeClass::Const
-            || edge.sources.iter().any(|s| {
-                state.full.contains(s) || state.spent.contains(s) || is_owned(*s)
-            });
+            || edge
+                .sources
+                .iter()
+                .any(|s| state.full.contains(s) || state.spent.contains(s) || is_owned(*s));
         if feeds {
             for s in full_sources {
                 if !targets.contains(&s) {
@@ -637,12 +648,19 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
             tag.push_str("labelled ");
         }
         if !outs.is_empty() {
-            tag.push_str(&format!("out:{} ", outs.into_iter().collect::<Vec<_>>().join(",")));
+            tag.push_str(&format!(
+                "out:{} ",
+                outs.into_iter().collect::<Vec<_>>().join(",")
+            ));
         }
         let ins = ins.into_iter().collect::<Vec<_>>();
         tag.push_str(&format!(
             "in:{}",
-            if ins.is_empty() { "-".into() } else { ins.join(",") }
+            if ins.is_empty() {
+                "-".into()
+            } else {
+                ins.join(",")
+            }
         ));
         tag
     }
@@ -667,7 +685,11 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
             "{}{}blocked by:{}",
             if is_labelled(n) { "labelled " } else { "" },
             if is_future(n) { "future " } else { "" },
-            if outs.is_empty() { "-".into() } else { outs.join(",") }
+            if outs.is_empty() {
+                "-".into()
+            } else {
+                outs.join(",")
+            }
         )
     }
 
@@ -732,7 +754,10 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
         let near = actual
             .edges
             .iter()
-            .filter(|e| e.nodes().any(|n| missing.contains(&n) || extra.contains(&n)))
+            .filter(|e| {
+                e.nodes()
+                    .any(|n| missing.contains(&n) || extra.contains(&n))
+            })
             .map(|e| e.display(self.ctxt))
             .collect::<Vec<_>>();
         self.report.mismatches.push(json!({
@@ -786,10 +811,7 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
         } else {
             let kind = &data.terminator().kind;
             self.stmt = format!("{kind:?}");
-            self.stmt_kind = format!(
-                "TERM {}",
-                kind.name()
-            );
+            self.stmt_kind = format!("TERM {}", kind.name());
         }
         self.at = format!("{block:?}[{index}]");
     }
@@ -876,7 +898,10 @@ pub fn replay(output: &mut PcgOutput<'_, '_>) -> Value {
             }
         }
         if let Some(last) = pcg_block.statements.last() {
-            state.graph = Graph::of(last.states[EvalStmtPhase::last()].borrow_pcg().graph(), ctxt);
+            state.graph = Graph::of(
+                last.states[EvalStmtPhase::last()].borrow_pcg().graph(),
+                ctxt,
+            );
         }
         replay.at = format!("{block:?}[term]");
         for succ in &pcg_block.terminator.succs {

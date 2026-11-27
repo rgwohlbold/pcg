@@ -328,13 +328,16 @@ pub(crate) trait PlaceCollapser<'a, 'tcx: 'a>:
                     if self.borrows_state().graph.contains(future, ctxt.bc_ctxt()) {
                         for node in &rp_expansion {
                             if let Some(place) = node.base.as_current_place() {
-                                let labeller = SetLabel(self.prev_snapshot_location());
-                                self.borrows_state().graph.label_place(
-                                    (*place).into(),
-                                    LabelPlaceReason::Collapse,
-                                    &labeller,
-                                    ctxt,
-                                );
+                                // An action, so that a client sees the
+                                // renamed nodes.
+                                self.apply_action(
+                                    BorrowPcgAction::label_place_and_update_related_capabilities(
+                                        (*place).into(),
+                                        self.prev_snapshot_location(),
+                                        LabelPlaceReason::Collapse,
+                                    )
+                                    .into(),
+                                )?;
                             }
                         }
                         self.apply_action(
