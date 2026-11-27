@@ -54,6 +54,10 @@
 //!    without a value are emptied: what they held left with the value (e.g.
 //!    the result's contents, which go to the caller at the return). This rule
 //!    reads the PCG's capabilities; each use is reported.
+//! 8. An output of a function call's edge that gave its contents back to its
+//!    lender through a future edge (rule 2) holds nothing, although it stays a
+//!    leaf of the call's edge, which the call's other outputs still need. It
+//!    is not counted as a leaf; each use is reported.
 //!
 //! The replay is enabled in `pcg_bin` with `PCG_HOLDERS_REPLAY=<file>`; it
 //! appends one JSON line per function to the file.
@@ -369,6 +373,14 @@ impl<'tcx> Graph<'tcx> {
             .collect()
     }
 
+    /// Whether the node is an output of a function call's edge.
+    fn is_call_output(&self, n: Node<'tcx>) -> bool {
+        self.edges.iter().any(|e| {
+            matches!(e.class, EdgeClass::Coupled | EdgeClass::FunctionCall)
+                && e.targets.contains(&n)
+        })
+    }
+
     fn has_incoming(&self, n: Node<'tcx>) -> bool {
         self.edges.iter().any(|e| e.targets.contains(&n))
     }
@@ -406,8 +418,10 @@ struct State<'tcx> {
     /// Nodes that gave their contents back in the current phase.
     gave: HashSet<Node<'tcx>>,
     /// Nodes that gave their contents to a future node that became current
-    /// (rule 2) and have been empty since; for the report only.
+    /// (rule 2) and have been empty since (for rule 8 and the report).
     gave_to_future: HashSet<Node<'tcx>>,
+    /// The call outputs already reported for rule 8.
+    reported_outputs: HashSet<Node<'tcx>>,
 }
 
 /// Counters and findings of the replay of one function.
@@ -425,6 +439,8 @@ struct Report {
     /// Full nodes emptied at the end of a phase because their place has no
     /// value (rule 7).
     dropped_with_value: Vec<Value>,
+    /// Call outputs that are leaves but gave their contents back (rule 8).
+    emptied_call_outputs: Vec<Value>,
 }
 
 struct Replay<'a, 'tcx> {
@@ -833,7 +849,35 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
                 ),
             }));
         }
-        let leaves = actual.leaves();
+        let mut leaves = actual.leaves();
+        // Rule 8: an output of a call that gave its contents back to its
+        // lender through a future edge holds nothing, although it stays a
+        // leaf of the call's edge (which the call's other outputs still need).
+        state.gave_to_future.retain(|n| !state.full.contains(n));
+        let emptied_outputs = leaves
+            .iter()
+            .copied()
+            .filter(|n| state.gave_to_future.contains(n) && actual.is_call_output(*n))
+            .collect::<Vec<_>>();
+        for n in &emptied_outputs {
+            leaves.remove(n);
+            if state.reported_outputs.insert(*n) {
+                self.report.emptied_call_outputs.push(json!({
+                    "at": self.at,
+                    "phase": phase,
+                    "stmt": self.stmt,
+                    "node": self.show(*n),
+                }));
+            }
+        }
+        let start_leaves = start_leaves.map(|start| {
+            start
+                .iter()
+                .copied()
+                .filter(|n| !emptied_outputs.contains(n))
+                .collect::<HashSet<_>>()
+        });
+        let start_leaves = start_leaves.as_ref();
         let nodes = actual.nodes();
         let in_graph = state
             .full
@@ -855,7 +899,6 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
             }
             return true;
         }
-        state.gave_to_future.retain(|n| !state.full.contains(n));
         let missing_tags = missing
             .iter()
             .map(|n| {
@@ -969,6 +1012,7 @@ impl<'a, 'tcx> Replay<'a, 'tcx> {
             "mismatches": r.mismatches,
             "unknown_removals": r.unknown_removals,
             "dropped_with_value": r.dropped_with_value,
+            "emptied_call_outputs": r.emptied_call_outputs,
         })
     }
 }
