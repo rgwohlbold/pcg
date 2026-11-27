@@ -76,6 +76,7 @@ use crate::{
         edge_data::{EdgeData, NodeReplacement},
         graph::BorrowsGraph,
         region_projection::{LifetimeProjectionLabel, PlaceOrConst},
+        validity_conditions::{ValidityConditions, ValidityConditionsLike},
     },
     pcg::{
         CapabilityKind, EvalStmtPhase, Pcg, PcgNode, place_capabilities::PlaceCapabilitiesReader,
@@ -302,6 +303,39 @@ impl<'tcx> Graph<'tcx> {
     ) -> Self {
         Graph {
             edges: graph.edges().map(|e| Edge::new(e.kind(), ctxt)).collect(),
+            without_value,
+        }
+    }
+
+    /// The graph on entry to `to` coming from `from`, whose path conditions
+    /// are `path`: without the edges that are valid only on other paths into
+    /// `to` (e.g. those of the other branch at a join).
+    fn on_cfg_edge(
+        graph: &BorrowsGraph<'tcx>,
+        without_value: HashSet<Place<'tcx>>,
+        path: &ValidityConditions,
+        from: BasicBlock,
+        to: BasicBlock,
+        ctxt: CompilerCtxt<'_, 'tcx>,
+    ) -> Self {
+        let body = ctxt.body();
+        let valid = |conditions: &ValidityConditions| {
+            conditions.all_branch_choices().all(|choice| {
+                let chosen = choice.successors(body);
+                if choice.from() == from {
+                    return chosen.contains(&to);
+                }
+                path.all_branch_choices()
+                    .find(|taken| taken.from() == choice.from())
+                    .is_none_or(|taken| taken.successors(body).iter().any(|s| chosen.contains(s)))
+            })
+        };
+        Graph {
+            edges: graph
+                .edges()
+                .filter(|e| valid(e.conditions))
+                .map(|e| Edge::new(e.kind(), ctxt))
+                .collect(),
             without_value,
         }
     }
@@ -1002,6 +1036,15 @@ pub fn replay(output: &mut PcgOutput<'_, '_>) -> Value {
             state.graph = Graph::of_state(&last.states[EvalStmtPhase::last()], ctxt);
         }
         replay.at = format!("{block:?}[term]");
+        let path_conditions = pcg_block
+            .statements
+            .last()
+            .map(|last| {
+                last.states[EvalStmtPhase::last()]
+                    .borrow_pcg()
+                    .validity_conditions
+            })
+            .unwrap_or(ValidityConditions::EMPTY);
         for succ in &pcg_block.terminator.succs {
             let mut state = state.clone();
             state.spent.clear();
@@ -1010,12 +1053,15 @@ pub fn replay(output: &mut PcgOutput<'_, '_>) -> Value {
             for action in succ.actions().iter() {
                 replay.apply_action(&mut state, action);
             }
-            let actual = Graph::of(
+            let actual = Graph::on_cfg_edge(
                 succ.entry_graph(),
                 entry_without_value
                     .get(&succ.block())
                     .cloned()
                     .unwrap_or_default(),
+                path_conditions,
+                block,
+                succ.block(),
                 ctxt,
             );
             replay.report.edges_checked += 1;
